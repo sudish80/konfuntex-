@@ -1,4 +1,4 @@
-# Colab Agent
+# Konfuntex
 
 Autonomous agentic interface for fine-tuning HuggingFace models in Google Colab. Uses an LLM-powered loop to plan, generate, execute, and iterate on fine-tuning workflows inside Colab notebooks — with runtime auto-switching, error recovery, cost tracking, persistent storage, a plugin system, and a self-improvement loop.
 

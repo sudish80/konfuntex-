@@ -3,13 +3,13 @@
 Konfuntex CLI — Claude Code-style terminal interface.
 """
 
-import json
-import os
 import sys
-import threading
+import os
+import json
 import time
-from datetime import datetime
+import threading
 from pathlib import Path
+from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -21,7 +21,7 @@ from rich.layout import Layout
 from rich.live import Live
 from rich.markup import escape
 from rich.panel import Panel
-from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn, TimeElapsedColumn
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn
 from rich.prompt import Prompt
 from rich.rule import Rule
 from rich.syntax import Syntax
@@ -46,7 +46,10 @@ BANNER = r"""[bright_magenta]  _  ___  _  _ ___ _   _ _  _ _____ _____  __
 
 def _header():
     console.print(BANNER)
-    console.print(f"[{MUTED}]autonomous local fine-tuning agent  [{ACCENT}]/help[/{ACCENT}] for commands[/{MUTED}]\n")
+    console.print(
+        f"[{MUTED}]autonomous local fine-tuning agent  "
+        f"[{ACCENT}]/help[/{ACCENT}] for commands[/{MUTED}]\n"
+    )
 
 
 def _sep():
@@ -105,7 +108,6 @@ def _code_block(code: str, language="python"):
 def cmd_init():
     from config.settings import settings
     from storage.database import init_db
-
     os.makedirs(settings.data_dir, exist_ok=True)
     init_db()
     _ok(f"database initialised at [white]{settings.data_dir}[/white]")
@@ -162,12 +164,12 @@ def cmd_run(goal: str, model: str = None, dataset: str = None, method: str = Non
 def cmd_interactive():
     _header()
 
-    history_file = Path(__import__("config.settings", fromlist=["settings"]).settings.data_dir) / "history.json"
+    history_file = Path(
+        __import__("config.settings", fromlist=["settings"]).settings.data_dir
+    ) / "history.json"
     history: list[str] = json.loads(history_file.read_text()) if history_file.exists() else []
 
-    console.print(
-        f"  [{MUTED}]type a goal and press enter. [/{MUTED}][{ACCENT}]/help[/{ACCENT}][{MUTED}] for commands.[/{MUTED}]\n"
-    )
+    console.print(f"  [{MUTED}]type a goal and press enter. [/{MUTED}][{ACCENT}]/help[/{ACCENT}][{MUTED}] for commands.[/{MUTED}]\n")
 
     while True:
         try:
@@ -203,19 +205,19 @@ def _handle_slash(cmd: str, history: list):
         table.add_column(style=ACCENT, width=20)
         table.add_column(style=MUTED)
         rows = [
-            ("/run <goal>", "run the agent with a goal"),
-            ("/jobs", "list recent fine-tuning jobs"),
-            ("/job <id>", "show job details"),
-            ("/models", "list saved model versions"),
-            ("/convs", "list conversations"),
-            ("/status", "show GPU and agent status"),
-            ("/config", "show current configuration"),
-            ("/colab", "print standalone Colab setup script"),
-            ("/backup [path]", "export all data to JSON"),
-            ("/restore <path>", "restore from JSON backup"),
-            ("/clear", "clear the screen"),
-            ("/help", "show this message"),
-            ("exit / quit", "exit interactive mode"),
+            ("/run <goal>",          "run the agent with a goal"),
+            ("/jobs",                "list recent fine-tuning jobs"),
+            ("/job <id>",            "show job details"),
+            ("/models",              "list saved model versions"),
+            ("/convs",               "list conversations"),
+            ("/status",              "show GPU and agent status"),
+            ("/config",              "show current configuration"),
+            ("/colab",               "print standalone Colab setup script"),
+            ("/backup [path]",       "export all data to JSON"),
+            ("/restore <path>",      "restore from JSON backup"),
+            ("/clear",               "clear the screen"),
+            ("/help",                "show this message"),
+            ("exit / quit",         "exit interactive mode"),
         ]
         for r in rows:
             table.add_row(*r)
@@ -280,7 +282,6 @@ def _handle_slash(cmd: str, history: list):
 def _status_display():
     try:
         import torch
-
         if torch.cuda.is_available():
             name = torch.cuda.get_device_name(0)
             total = torch.cuda.get_device_properties(0).total_memory / 1024**3
@@ -295,7 +296,6 @@ def _status_display():
 
     try:
         from config.settings import settings
-
         db = settings.get_db_url()
         _ok(f"db  [{INFO}]{db[:60]}[/{INFO}]")
     except Exception:
@@ -305,7 +305,6 @@ def _status_display():
 
 def cmd_list_jobs():
     from storage.jobs import JobStore
-
     store = JobStore()
     jobs = store.list()
     if not jobs:
@@ -335,7 +334,6 @@ def cmd_list_jobs():
 
 def cmd_list_models():
     from storage.models_store import ModelVersionStore
-
     store = ModelVersionStore()
     models = store.list_all()
     if not models:
@@ -363,7 +361,6 @@ def cmd_list_models():
 
 def cmd_list_convs():
     from storage.conversations import ConversationStore
-
     store = ConversationStore()
     convs = store.list_all()
     if not convs:
@@ -392,7 +389,6 @@ def cmd_list_convs():
 
 def cmd_show_job(job_id: str):
     from storage.jobs import JobStore
-
     store = JobStore()
     job = store.get(job_id)
     if not job:
@@ -423,7 +419,6 @@ def cmd_show_job(job_id: str):
 
 def cmd_show_conv(conv_id: str):
     from storage.conversations import ConversationStore
-
     store = ConversationStore()
     conv = store.get(conv_id)
     if not conv:
@@ -442,7 +437,6 @@ def cmd_show_conv(conv_id: str):
 
 def cmd_config():
     from config.settings import settings
-
     _sep()
     table = Table(box=None, show_header=False, padding=(0, 2))
     table.add_column(style=MUTED, width=28)
@@ -459,7 +453,7 @@ def cmd_config():
 
 
 def cmd_colab_code():
-    code = """# ===== Konfuntex — Standalone Colab Setup =====
+    code = '''# ===== Konfuntex — Standalone Colab Setup =====
 !pip install -q transformers datasets accelerate peft trl bitsandbytes huggingface_hub torch
 
 import torch
@@ -507,20 +501,20 @@ trainer.train()
 trainer.save_model(OUTPUT_DIR)
 tokenizer.save_pretrained(OUTPUT_DIR)
 print(f"Saved → {OUTPUT_DIR}")
-"""
+'''
     _code_block(code)
 
 
 def cmd_backup(path: str = None):
-    from datetime import timezone
-
-    from config.settings import settings
-    from storage.conversations import ConversationStore
     from storage.jobs import JobStore
-    from storage.metrics_store import MetricsStore
+    from storage.conversations import ConversationStore
     from storage.models_store import ModelVersionStore
+    from storage.metrics_store import MetricsStore
+    from config.settings import settings
 
-    backup_path = path or os.path.join(settings.data_dir, f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+    backup_path = path or os.path.join(
+        settings.data_dir, f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    )
     os.makedirs(os.path.dirname(os.path.abspath(backup_path)), exist_ok=True)
 
     jobs = JobStore().list(limit=99999)
@@ -532,38 +526,22 @@ def cmd_backup(path: str = None):
         "created_at": datetime.now(timezone.utc).isoformat(),
         "data": {
             "jobs": [
-                {
-                    "id": j.id,
-                    "goal": j.goal,
-                    "status": j.status,
-                    "method": j.method,
-                    "base_model": j.base_model,
-                    "dataset": j.dataset,
-                    "error": j.error,
-                    "metrics_json": j.metrics,
-                    "created_at": j.created_at.isoformat() if j.created_at else None,
-                }
+                {"id": j.id, "goal": j.goal, "status": j.status, "method": j.method,
+                 "base_model": j.base_model, "dataset": j.dataset, "error": j.error,
+                 "metrics_json": j.metrics,
+                 "created_at": j.created_at.isoformat() if j.created_at else None}
                 for j in jobs
             ],
             "conversations": [
-                {
-                    "id": c.id,
-                    "goal": c.goal,
-                    "status": c.status,
-                    "messages_json": c.messages_json,
-                    "created_at": c.created_at.isoformat() if c.created_at else None,
-                }
+                {"id": c.id, "goal": c.goal, "status": c.status,
+                 "messages_json": c.messages_json,
+                 "created_at": c.created_at.isoformat() if c.created_at else None}
                 for c in convs
             ],
             "models": [
-                {
-                    "id": m.id,
-                    "base_model": m.base_model,
-                    "method": m.method,
-                    "final_loss": m.final_loss,
-                    "finetuned_path": m.finetuned_path,
-                    "created_at": m.created_at.isoformat() if m.created_at else None,
-                }
+                {"id": m.id, "base_model": m.base_model, "method": m.method,
+                 "final_loss": m.final_loss, "finetuned_path": m.finetuned_path,
+                 "created_at": m.created_at.isoformat() if m.created_at else None}
                 for m in models
             ],
         },
@@ -599,14 +577,12 @@ def cmd_serve(host: str = "0.0.0.0", port: int = 8080):
     os.environ["PORT"] = str(port)
     sys.argv.append("--fastapi")
     from agent.service import serve
-
     _ok(f"starting service on [{INFO}]{host}:{port}[/{INFO}]")
     serve()
 
 
 def main():
     import argparse
-
     parser = argparse.ArgumentParser(
         description="konfuntex — autonomous local fine-tuning agent",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -636,24 +612,23 @@ def main():
     extra = args.args
 
     dispatch = {
-        "init": lambda: cmd_init(),
-        "run": lambda: cmd_run(
-            " ".join(extra) if extra else Prompt.ask(f"[{ACCENT}]goal[/{ACCENT}]"),
-            model=args.model,
-            dataset=args.dataset,
-            method=args.method,
-        ),
-        "interactive": lambda: cmd_interactive(),
-        "jobs": lambda: cmd_list_jobs(),
-        "job": lambda: cmd_show_job(extra[0]) if extra else _fail("need job id"),
-        "models": lambda: cmd_list_models(),
-        "convs": lambda: cmd_list_convs(),
-        "conv": lambda: cmd_show_conv(extra[0]) if extra else _fail("need conv id"),
-        "config": lambda: cmd_config(),
-        "colab": lambda: cmd_colab_code(),
-        "backup": lambda: cmd_backup(" ".join(extra) if extra else None),
-        "restore": lambda: cmd_restore(extra[0]) if extra else _fail("usage: restore <path>"),
-        "serve": lambda: cmd_serve(extra[0] if extra else "0.0.0.0", int(extra[1]) if len(extra) > 1 else 8080),
+        "init":         lambda: cmd_init(),
+        "run":          lambda: cmd_run(
+                            " ".join(extra) if extra else Prompt.ask(f"[{ACCENT}]goal[/{ACCENT}]"),
+                            model=args.model, dataset=args.dataset, method=args.method),
+        "interactive":  lambda: cmd_interactive(),
+        "jobs":         lambda: cmd_list_jobs(),
+        "job":          lambda: cmd_show_job(extra[0]) if extra else _fail("need job id"),
+        "models":       lambda: cmd_list_models(),
+        "convs":        lambda: cmd_list_convs(),
+        "conv":         lambda: cmd_show_conv(extra[0]) if extra else _fail("need conv id"),
+        "config":       lambda: cmd_config(),
+        "colab":        lambda: cmd_colab_code(),
+        "backup":       lambda: cmd_backup(" ".join(extra) if extra else None),
+        "restore":      lambda: cmd_restore(extra[0]) if extra else _fail("usage: restore <path>"),
+        "serve":        lambda: cmd_serve(
+                            extra[0] if extra else "0.0.0.0",
+                            int(extra[1]) if len(extra) > 1 else 8080),
     }
 
     handler = dispatch.get(cmd)
