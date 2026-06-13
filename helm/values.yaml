@@ -1,0 +1,124 @@
+# ── Global ───────────────────────────────────────────────────────────
+global:
+  imageRegistry: ""
+  imagePullSecrets: []
+
+# ── Image ────────────────────────────────────────────────────────────
+image:
+  repository: colab-agent
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# ── Service ──────────────────────────────────────────────────────────
+service:
+  type: ClusterIP
+  port: 8080
+  annotations: {}
+
+# ── Ingress ──────────────────────────────────────────────────────────
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: colab-agent.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# ── Resources ────────────────────────────────────────────────────────
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: 2
+    memory: 2Gi
+
+# ── Autoscaling ──────────────────────────────────────────────────────
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 80
+
+# ── Replicas ─────────────────────────────────────────────────────────
+replicaCount: 1
+
+# ── Strategy ─────────────────────────────────────────────────────────
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
+
+# ── Probes ───────────────────────────────────────────────────────────
+livenessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 30
+  periodSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 5
+
+# ── Environment ──────────────────────────────────────────────────────
+env:
+  COLAB_AGENT_ENV: prod
+  COLAB_AGENT_DB_URL: postgresql://colab:$(COLAB_AGENT_DB_PASSWORD)@{{ .Release.Name }}-postgresql:5432/colab-agent
+  COLAB_AGENT_LLM_PROVIDER: openai
+  COLAB_AGENT_LLM_MODEL: gpt-4
+  COLAB_AGENT_AGENT_MAX_ITERATIONS: "50"
+  COLAB_AGENT_BUDGET_MAX_UNITS: "100"
+  COLAB_AGENT_RATE_LIMIT: "60"
+  COLAB_AGENT_RATE_LIMIT_BURST: "10"
+
+# ── Secrets (set via --set or values file) ───────────────────────────
+secrets:
+  apiKey: ""
+  dbPassword: "changeme"
+  openaiApiKey: ""
+  hfToken: ""
+  githubToken: ""
+  sentryDsn: ""
+
+# ─── PostgreSQL ──────────────────────────────────────────────────────
+postgresql:
+  enabled: true
+  auth:
+    database: colab-agent
+    username: colab
+    password: changeme
+  primary:
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: 1
+        memory: 1Gi
+    persistence:
+      size: 10Gi
+
+# ── Pod-level ────────────────────────────────────────────────────────
+podAnnotations: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+securityContext:
+  capabilities:
+    drop: ["ALL"]
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

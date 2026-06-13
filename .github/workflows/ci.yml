@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHONPATH: ${{ github.workspace }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff
+      - name: Lint with ruff
+        run: ruff check . --exclude capabilities
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-timeout
+          pip install -e .
+      - name: Run tests (no API keys required)
+        env:
+          COLAB_AGENT_DATA_DIR: /tmp/colab-agent-data
+          COLAB_AGENT_DB_URL: sqlite:////tmp/colab-agent-test.db
+          COLAB_AGENT_OPENAI_API_KEY: ""
+          COLAB_AGENT_ANTHROPIC_API_KEY: ""
+          COLAB_AGENT_GEMINI_API_KEY: ""
+          COLAB_AGENT_HF_TOKEN: ""
+          COLAB_AGENT_GITHUB_TOKEN: ""
+        run: |
+          pytest tests/ \
+            --ignore=tests/test_e2e_agent.py \
+            --ignore=tests/test_integration.py \
+            --ignore=tests/test_models.py \
+            --ignore=tests/test_scenarios.py \
+            --ignore=tests/test_storage.py \
+            --timeout=60 \
+            -q
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t colab-agent --target runtime .

@@ -1,0 +1,24 @@
+apiVersion: v2
+name: colab-agent
+description: Autonomous LLM-powered agent for fine-tuning HuggingFace models in Google Colab
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+
+keywords:
+  - ml
+  - fine-tuning
+  - colab
+  - llm
+  - agent
+
+home: https://github.com/sudish80/colab-agent
+sources:
+  - https://github.com/sudish80/colab-agent
+
+dependencies:
+  - name: postgresql
+    version: ~16.0
+    repository: https://charts.bitnami.com/bitnami
+    condition: postgresql.enabled
+    alias: postgresql

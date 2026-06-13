@@ -1,0 +1,56 @@
+services:
+  agent:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - data:/data
+    environment:
+      - COLAB_AGENT_DATA_DIR=/data
+      - COLAB_AGENT_DB_URL=postgresql+psycopg2://agent:agent@db:5432/agent
+      - COLAB_AGENT_LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - COLAB_AGENT_OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - COLAB_AGENT_HF_TOKEN=${HF_TOKEN:-}
+      - COLAB_AGENT_GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - COLAB_AGENT_BUDGET_MAX=${BUDGET_MAX:-100.0}
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "2"
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  db:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=agent
+      - POSTGRES_PASSWORD=agent
+      - POSTGRES_DB=agent
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d agent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1"
+    restart: unless-stopped
+
+volumes:
+  data:
+  postgres_data:

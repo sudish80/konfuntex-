@@ -1,0 +1,11 @@
+target-version = "py312"
+line-length = 120
+
+exclude = [".git", ".pytest_cache", "capabilities/*.py", "tests/test_integration.py"]
+
+[lint]
+select = ["E", "F", "W"]
+ignore = ["E501", "E702", "E701", "E401"]
+
+[format]
+preview = true

@@ -1,0 +1,42 @@
+from setuptools import setup, find_packages
+
+setup(
+    name="colab-agent",
+    version="1.0.0",
+    description="Autonomous agentic interface for fine-tuning HuggingFace models in Google Colab",
+    author="Colab Agent",
+    packages=find_packages(),
+    install_requires=[
+        "openai>=1.0.0",
+        "anthropic>=0.30.0",
+        "google-generativeai>=0.3.0",
+        "pydantic>=2.0.0",
+        "pydantic-settings>=2.0.0",
+        "rich>=13.0.0",
+        "sqlalchemy>=2.0.0",
+        "google-api-python-client>=2.0.0",
+        "google-auth-httplib2>=0.1.0",
+        "google-auth-oauthlib>=1.0.0",
+        "nbformat>=5.9.0",
+        "requests>=2.31.0",
+        "httpx>=0.25.0",
+        "transformers>=4.36.0",
+        "peft>=0.7.0",
+        "trl>=0.7.0",
+        "datasets>=2.16.0",
+        "accelerate>=0.25.0",
+        "bitsandbytes>=0.41.0",
+        "safetensors>=0.4.0",
+        "PyGithub>=2.1.0",
+        "streamlit>=1.28.0",
+        "python-dotenv>=1.0.0",
+        "typer>=0.9.0",
+        "tabulate>=0.9.0",
+    ],
+    entry_points={
+        "console_scripts": [
+            "colab-agent=cli:main",
+        ],
+    },
+    python_requires=">=3.9",
+)

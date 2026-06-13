@@ -1,0 +1,150 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "colab-agent.fullname" . }}-grafana-dashboard
+  labels:
+    {{- include "colab-agent.labels" . | nindent 4 }}
+    grafana_dashboard: "1"
+data:
+  colab-agent-dashboard.json: |
+    {
+      "__inputs": [],
+      "__requires": [],
+      "title": "Colab Agent",
+      "uid": "colab-agent",
+      "version": 1,
+      "tags": ["colab-agent", "ml"],
+      "timezone": "browser",
+      "panels": [
+        {
+          "title": "Request Rate",
+          "type": "graph",
+          "span": 6,
+          "targets": [
+            {
+              "expr": "rate(http_requests_total{job=\"colab-agent\"}[5m])",
+              "legendFormat": "{{`{{path}}`}}"
+            }
+          ],
+          "yaxes": [{"format": "rps", "label": "Requests/s"}]
+        },
+        {
+          "title": "Request Latency (p99)",
+          "type": "graph",
+          "span": 6,
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{job=\"colab-agent\"}[5m]))",
+              "legendFormat": "{{`{{path}}`}}"
+            }
+          ],
+          "yaxes": [{"format": "s", "label": "Latency"}]
+        },
+        {
+          "title": "Active Jobs",
+          "type": "stat",
+          "span": 4,
+          "targets": [
+            {"expr": "sum(agent_active_jobs{job=\"colab-agent\"})"}
+          ],
+          "thresholds": [{"value": 5, "color": "orange"}, {"value": 10, "color": "red"}]
+        },
+        {
+          "title": "Circuit Breaker State",
+          "type": "stat",
+          "span": 4,
+          "targets": [
+            {"expr": "agent_circuit_state{job=\"colab-agent\"}"}
+          ],
+          "thresholds": [{"value": 0, "color": "green"}, {"value": 1, "color": "orange"}, {"value": 2, "color": "red"}]
+        },
+        {
+          "title": "Budget Usage %",
+          "type": "gauge",
+          "span": 4,
+          "targets": [
+            {"expr": "agent_budget_usage_pct{job=\"colab-agent\"}"}
+          ],
+          "thresholds": [{"value": 80, "color": "green"}, {"value": 90, "color": "orange"}, {"value": 100, "color": "red"}]
+        },
+        {
+          "title": "LLM Cache Hit Rate",
+          "type": "graph",
+          "span": 6,
+          "targets": [
+            {
+              "expr": "rate(cache_hits_total{job=\"colab-agent\"}[5m]) / (rate(cache_hits_total{job=\"colab-agent\"}[5m]) + rate(cache_misses_total{job=\"colab-agent\"}[5m])) * 100",
+              "legendFormat": "Hit Rate %"
+            }
+          ],
+          "yaxes": [{"format": "percent", "max": 100}]
+        },
+        {
+          "title": "Runtime Switches",
+          "type": "graph",
+          "span": 6,
+          "targets": [
+            {"expr": "rate(agent_runtime_switches_total{job=\"colab-agent\"}[5m])"}
+          ],
+          "yaxes": [{"format": "short", "label": "Switches/s"}]
+        },
+        {
+          "title": "Plugin Execution Errors",
+          "type": "graph",
+          "span": 6,
+          "targets": [
+            {"expr": "rate(plugin_errors_total{job=\"colab-agent\"}[5m])"}
+          ],
+          "yaxes": [{"format": "short", "label": "Errors/s"}]
+        },
+        {
+          "title": "Memory Usage",
+          "type": "graph",
+          "span": 6,
+          "targets": [
+            {"expr": "process_resident_memory_bytes{job=\"colab-agent\"}"}
+          ],
+          "yaxes": [{"format": "bytes"}]
+        },
+        {
+          "title": "CPU Usage",
+          "type": "graph",
+          "span": 6,
+          "targets": [
+            {"expr": "rate(process_cpu_seconds_total{job=\"colab-agent\"}[5m])"}
+          ],
+          "yaxes": [{"format": "percentunit"}]
+        },
+        {
+          "title": "Alert Count",
+          "type": "stat",
+          "span": 4,
+          "targets": [
+            {"expr": "agent_alert_count{job=\"colab-agent\"}"}
+          ]
+        },
+        {
+          "title": "Rate Limit Rejections",
+          "type": "graph",
+          "span": 4,
+          "targets": [
+            {"expr": "rate(rate_limit_rejections_total{job=\"colab-agent\"}[5m])"}
+          ]
+        },
+        {
+          "title": "Auth Failures",
+          "type": "graph",
+          "span": 4,
+          "targets": [
+            {"expr": "rate(auth_failures_total{job=\"colab-agent\"}[5m])"}
+          ]
+        }
+      ],
+      "rows": [
+        {"title": "Traffic", "panels": [0, 1]},
+        {"title": "Agent Health", "panels": [2, 3, 4]},
+        {"title": "Performance", "panels": [5, 6, 7]},
+        {"title": "Resources", "panels": [8, 9]},
+        {"title": "Security", "panels": [10, 11, 12]}
+      ]
+    }

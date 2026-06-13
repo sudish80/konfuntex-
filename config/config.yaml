@@ -1,0 +1,55 @@
+# Colab Agent — Configuration
+# Paths, defaults, and limits for the autonomous fine-tuning agent.
+
+agent:
+  max_iterations: 50
+  temperature: 0.2
+  verbose: true
+
+  # Safety limits
+  max_runtime_switches: 5
+  max_error_retries_per_step: 10
+  max_total_error_retries: 50
+  max_colab_hours: 12
+  max_vram_gb: 80
+
+storage:
+  data_dir: "~/.colab-agent"
+  db_url: "sqlite:///{data_dir}/colab_agent.db"
+
+runtime:
+  auto_switch: true
+  tiers:
+    None: 0
+    T4: 16
+    P100: 16
+    V100: 32
+    A100: 40
+    A100-80GB: 80
+    TPU: 128
+
+finetune:
+  default_method: "qlora"
+  default_base_model: "microsoft/phi-2"
+  default_epochs: 3
+  default_batch_size: 4
+  default_learning_rate: 0.0002
+  default_max_length: 512
+  gradient_checkpointing: true
+  save_steps: 500
+  logging_steps: 25
+
+huggingface:
+  cache_dir: "~/.cache/huggingface"
+  hub:
+    push_to_hub: false
+
+colab:
+  drive_checkpoint_dir: "/content/drive/MyDrive/colab-checkpoints"
+  notebook_title: "Colab-Agent Notebook"
+
+github:
+  repo: ""
+  error_dir: "errors"
+  report_dir: "reports"
+  metrics_dir: "metrics"

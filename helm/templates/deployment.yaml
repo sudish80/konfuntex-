@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "colab-agent.fullname" . }}
+  labels:
+    {{- include "colab-agent.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  strategy:
+    {{- toYaml .Values.strategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "colab-agent.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        checksum/secrets: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+      labels:
+        {{- include "colab-agent.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.global.imageRegistry | default "" }}{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: COLAB_AGENT_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "colab-agent.fullname" . }}
+                  key: dbPassword
+            - name: COLAB_AGENT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "colab-agent.fullname" . }}
+                  key: apiKey
+                  optional: true
+            - name: COLAB_AGENT_OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "colab-agent.fullname" . }}
+                  key: openaiApiKey
+                  optional: true
+            - name: COLAB_AGENT_HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "colab-agent.fullname" . }}
+                  key: hfToken
+                  optional: true
+            - name: COLAB_AGENT_GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "colab-agent.fullname" . }}
+                  key: githubToken
+                  optional: true
+            - name: COLAB_AGENT_SENTRY_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "colab-agent.fullname" . }}
+                  key: sentryDsn
+                  optional: true
+            {{- range $key, $val := .Values.env }}
+            - name: {{ $key }}
+              value: {{ $val | quote }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
