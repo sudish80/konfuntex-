@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Agent Training Monitor</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <canvas id="lossChart" width="400" height="200"></canvas>
+    <script>
+        const ctx = document.getElementById('lossChart').getContext('2d');
+        const chart = new Chart(ctx, {
+            type: 'line',
+            data: { labels: [], datasets: [{ label: 'Loss', data: [] }] },
+            options: { scales: { y: { beginAtZero: true } } }
+        });
+
+        const job_id = "test-job"; // Replace with dynamic job_id
+        const ws = new WebSocket(`ws://localhost:8080/v1/ws/${job_id}?token=`);
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            if (data.type === 'metric_log' && data.data.loss) {
+                chart.data.labels.push(data.data.step);
+                chart.data.datasets[0].data.push(data.data.loss);
+                chart.update();
+            }
+        };
+    </script>
+</body>
+</html>

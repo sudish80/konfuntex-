@@ -1,14 +1,22 @@
 import json
 import time
+import random
 import re
+# ...
+def exponential_backoff(attempt: int, base_delay: float = 1.0, max_delay: float = 30.0):
+    delay = min(base_delay * (2 ** attempt), max_delay)
+    time.sleep(delay + random.uniform(0, 0.1 * delay))
 import os
 import uuid
 import logging
 import tempfile
 from typing import Optional, Callable
 from datetime import datetime, timezone
+from colab.local_kernel import LocalIPythonRunner
 
 logger = logging.getLogger(__name__)
+
+# ... (rest of the file content remains same, just adding the import and updating class)
 
 
 def _colab_auth_code() -> str:
@@ -89,8 +97,13 @@ class ColabRunner:
         self.active_notebook_id = None
         self.active_notebook_url = None
         self.execution_history = []
-        # Default to True (simulate), but allow env var override
         self.simulate = os.environ.get("COLAB_AGENT_SIMULATE", "True").lower() == "true"
+        self._local_kernel = None # Persistent kernel for local mode
+
+    def _get_local_kernel(self):
+        if self._local_kernel is None:
+            self._local_kernel = LocalIPythonRunner()
+        return self._local_kernel
 
     # ------------------------------------------------------------------ #
     #  1. create_notebook
@@ -364,12 +377,13 @@ print(f"Open: https://colab.research.google.com/drive/{{f['id']}}")
 
     def _execute_in_colab(self, code: str, timeout: int) -> dict:
         """
-        Real execution inside a Colab runtime using IPython magic.
-
-        This code path runs only inside Google Colab itself.
-        Uses IPython.get_ipython().run_cell() for synchronous execution.
-        Falls back to subprocess if IPython is unavailable.
+        Executes code in a persistent kernel.
         """
+        # If we are NOT in Colab, use persistent local kernel
+        if not os.environ.get("COLAB_GPU"):
+            return self._get_local_kernel().execute(code, timeout)
+            
+        # Otherwise, run inside Colab runtime using IPython magic.
         try:
             from IPython import get_ipython
             ipython = get_ipython()

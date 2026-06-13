@@ -6,13 +6,14 @@ Auto-detects PostgreSQL vs SQLite from the configured URL.
 
 import os
 import logging
+import json
+from datetime import datetime, timezone
 
 import sqlalchemy as sa
 from sqlalchemy import create_engine
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from sqlalchemy.pool import NullPool
-from datetime import datetime, timezone
-import json
 
 from config.settings import settings
 
@@ -122,12 +123,7 @@ class RuntimeLog(Base):
 
 
 def get_engine():
-    """Create a SQLAlchemy engine for the configured database URL.
-
-    Auto-detects PostgreSQL vs SQLite. Uses ``NullPool`` for
-    PostgreSQL to avoid connection pooling issues in containerised
-    environments.
-    """
+    """Create a SQLAlchemy engine for the configured database URL."""
     db_url = settings.get_db_url()
     if db_url.startswith("postgresql"):
         logger.info("Using PostgreSQL database")
@@ -162,11 +158,36 @@ def reset_session():
 
 
 def get_session():
-    """Return a singleton SQLAlchemy sessionmaker.
-
-    Lazily initialises the database on first call.
-    """
+    """Return a singleton SQLAlchemy sessionmaker."""
     global SessionLocal
     if SessionLocal is None:
         SessionLocal = init_db()
     return SessionLocal()
+
+
+# ── Async Support ──────────────────────────────────────────────────────────
+
+def get_async_engine():
+    db_url = settings.get_db_url()
+    if db_url.startswith("sqlite"):
+        async_url = db_url.replace("sqlite:///", "sqlite+aiosqlite:///")
+    elif db_url.startswith("postgresql"):
+        async_url = db_url.replace("postgresql://", "postgresql+asyncpg://")
+    else:
+        async_url = db_url
+
+    if async_url.startswith("postgresql"):
+        return create_async_engine(async_url, poolclass=NullPool)
+    
+    # SQLite
+    os.makedirs(settings.data_dir, exist_ok=True)
+    return create_async_engine(async_url)
+
+AsyncSessionLocal = None
+
+def get_async_sessionmaker():
+    global AsyncSessionLocal
+    if AsyncSessionLocal is None:
+        engine = get_async_engine()
+        AsyncSessionLocal = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+    return AsyncSessionLocal

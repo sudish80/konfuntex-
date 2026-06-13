@@ -1,34 +1,39 @@
 
 
 FINETUNE_METHODS = {
-    "lora": {
-        "description": "Low-Rank Adaptation - efficient, adds trainable adapters",
-        "memory_efficient": True,
-        "recommended_rank": 16,
-        "recommended_alpha": 32,
-        "target_modules": ["q_proj", "v_proj", "k_proj", "o_proj"],
-        "supports_4bit": False,
-        "supports_8bit": True,
+    "default": {
+        "lora": {
+            "recommended_rank": 16,
+            "recommended_alpha": 32,
+            "target_modules": ["q_proj", "v_proj", "k_proj", "o_proj"],
+        },
+        "qlora": {
+            "recommended_rank": 8,
+            "recommended_alpha": 16,
+            "target_modules": ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        }
     },
-    "qlora": {
-        "description": "QLoRA - 4-bit quantized LoRA, most memory efficient",
-        "memory_efficient": True,
-        "recommended_rank": 8,
-        "recommended_alpha": 16,
-        "target_modules": ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-        "supports_4bit": True,
-        "supports_8bit": True,
-    },
-    "full": {
-        "description": "Full fine-tuning - updates all parameters, requires most memory",
-        "memory_efficient": False,
-        "recommended_rank": None,
-        "recommended_alpha": None,
-        "target_modules": None,
-        "supports_4bit": False,
-        "supports_8bit": False,
-    },
+    "llama-3": {
+        "lora": {
+            "recommended_rank": 32,
+            "recommended_alpha": 64,
+            "target_modules": ["q_proj", "v_proj", "k_proj", "o_proj"],
+        }
+    }
 }
+
+def get_method_config(model_name: str, method: str) -> dict:
+    model_key = "default"
+    for m in ["llama-3", "phi-3", "mistral"]:
+        if m in model_name.lower():
+            model_key = m
+            break
+    
+    config = FINETUNE_METHODS.get(model_key, FINETUNE_METHODS["default"]).get(method, {})
+    # Return sensible defaults if not specified for this model
+    if not config:
+        return FINETUNE_METHODS["default"].get(method, {})
+    return config
 
 
 def estimate_memory(model_name: str) -> dict:

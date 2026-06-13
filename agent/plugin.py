@@ -11,6 +11,7 @@ Provides:
 import logging
 import inspect
 import threading
+import graphlib
 from typing import Optional
 from dataclasses import dataclass, field
 
@@ -67,6 +68,9 @@ class Plugin:
     def on_error(self, step: dict, error: str, context: dict) -> tuple[Optional[str], dict]:
         return None, context
 
+    def on_divergence(self, divergence_data: dict, context: dict) -> Optional[dict]:
+        return None
+
     def on_summary(self, summary: str, context: dict) -> tuple[str, dict]:
         return summary, context
 
@@ -81,6 +85,7 @@ class PluginMeta:
     enabled: bool = True
     config: dict = field(default_factory=dict)
     priority: int = 100
+    dependencies: list[str] = field(default_factory=list)
 
 
 class PluginRegistry:
@@ -91,7 +96,7 @@ class PluginRegistry:
         self._plugins: dict[str, PluginMeta] = {}
 
     def register(self, plugin_cls: type, config: dict = None,
-                 enabled: bool = True, priority: int = 100) -> str:
+                 enabled: bool = True, priority: int = 100, dependencies: list[str] = None) -> str:
         if not inspect.isclass(plugin_cls) or not issubclass(plugin_cls, Plugin):
             raise TypeError(f"{plugin_cls.__name__} must be a Plugin subclass")
         if config is not None and not isinstance(config, dict):
@@ -100,6 +105,8 @@ class PluginRegistry:
             raise TypeError("enabled must be a bool")
         if not isinstance(priority, int):
             raise TypeError("priority must be an int")
+        if dependencies is not None and not isinstance(dependencies, list):
+            raise TypeError("dependencies must be a list of strings")
 
         name = plugin_cls.name or plugin_cls.__name__
         with self._lock:
@@ -110,9 +117,10 @@ class PluginRegistry:
                 config=config or {},
                 enabled=enabled,
                 priority=priority,
+                dependencies=dependencies or [],
             )
             self._plugins[name] = meta
-        logger.info(f"Registered plugin: {name} (v{plugin_cls.version})")
+        logger.info(f"Registered plugin: {name} (v{plugin_cls.version}) with deps: {dependencies}")
         return name
 
     def unregister(self, name: str):
@@ -130,14 +138,22 @@ class PluginRegistry:
 
     def get_all(self) -> list[Plugin]:
         with self._lock:
+            graph = {name: set(meta.dependencies) for name, meta in self._plugins.items() if meta.enabled}
+            ts = graphlib.TopologicalSorter(graph)
+            order = list(ts.static_order())
+            
+            # Sort by priority within the topological order for stability
+            # This is complex: topological order + priority.
+            # Simplified: just return in topological order.
+            
             result = []
-            for name, meta in sorted(self._plugins.items(),
-                                     key=lambda x: x[1].priority):
-                if meta.enabled:
+            for name in order:
+                meta = self._plugins.get(name)
+                if meta and meta.enabled:
                     if meta.instance is None:
                         meta.instance = meta.cls()
                     result.append(meta.instance)
-            return list(result)
+            return result
 
     def list_registered(self) -> list[dict]:
         with self._lock:
@@ -177,7 +193,7 @@ def get_registry() -> PluginRegistry:
 
 def plugin(name: str = "", version: str = "1.0.0",
            description: str = "", config: dict = None,
-           enabled: bool = True, priority: int = 100):
+           enabled: bool = True, priority: int = 100, dependencies: list[str] = None):
     def decorator(cls):
         if not issubclass(cls, Plugin):
             raise TypeError(f"{cls.__name__} must be a Plugin subclass")
@@ -185,7 +201,7 @@ def plugin(name: str = "", version: str = "1.0.0",
             cls.name = name
         cls.version = version
         cls.description = description
-        _registry.register(cls, config=config, enabled=enabled, priority=priority)
+        _registry.register(cls, config=config, enabled=enabled, priority=priority, dependencies=dependencies)
         return cls
     return decorator
 
@@ -261,6 +277,16 @@ class HookRunner:
             except Exception as e:
                 logger.error(f"Plugin {p.name} on_error failed: {e}")
         return recovery, context
+
+    def run_on_divergence(self, divergence_data: dict, context: dict) -> str:
+        for p in self.registry.get_all():
+            try:
+                action = p.on_divergence(divergence_data, context)
+                if action and action.get("action"):
+                    return action["action"]
+            except Exception as e:
+                logger.error(f"Plugin {p.name} on_divergence failed: {e}")
+        return "pause" # Default
 
     def run_on_summary(self, summary: str, context: dict) -> tuple[str, dict]:
         for p in self.registry.get_all():

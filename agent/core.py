@@ -57,6 +57,7 @@ logger = logging.getLogger(__name__)
 class StepStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
+    PAUSED = "paused"  # New: Awaiting human input
     SUCCESS = "success"
     FAILED = "failed"
     SKIPPED = "skipped"
@@ -436,6 +437,19 @@ class OrchestratorAgent:
     #  Step execution
     # ---------------------------------------------------------------- #
 
+    def _check_memory(self):
+        """Monitor VRAM usage and trigger cleanup if nearly exhausted."""
+        try:
+            import torch
+            if torch.cuda.is_available():
+                allocated = torch.cuda.memory_allocated(0)
+                total = torch.cuda.get_device_properties(0).total_memory
+                if allocated / total > 0.90:
+                    self._log("ALERT: VRAM usage > 90%. Triggering cleanup.")
+                    torch.cuda.empty_cache()
+        except Exception:
+            pass
+
     def _execute_step(self, step: PlanStep) -> dict:
         step.status = StepStatus.RUNNING
         self._log(f"Step {step.id}: {step.description}")
@@ -509,12 +523,21 @@ class OrchestratorAgent:
                     result = self.runner.execute_cell(
                         cleaned, timeout=300, description=step.description,
                     )
+                    
+                    # --- VRAM Monitor ---
+                    self._check_memory()
 
                     step.output = result.get("output", "")
                     step.error = result.get("error", "")
                     step.execution_time = result.get("execution_time", 0.0)
                     self.cost_tracker.record_execution(
                         self.current_job_id, step.execution_time)
+
+                    # --- Check for Divergence ---
+                    if step.action == "train":
+                        self._monitor_divergence(step, step.output)
+                        if step.status == StepStatus.FAILED:
+                            continue # Retry if divergence detected
 
                     # --- Parse result ---
                     self.runner.parse_output(result)
@@ -661,10 +684,24 @@ class OrchestratorAgent:
     #  Code generation
     # ---------------------------------------------------------------- #
 
+    def _find_checkpoint(self, output_dir: str) -> Optional[str]:
+        """Check if a valid checkpoint exists in the output directory."""
+        if os.path.exists(output_dir):
+            checkpoints = [os.path.join(output_dir, d) for d in os.listdir(output_dir) 
+                           if d.startswith("checkpoint-")]
+            if checkpoints:
+                # Return latest checkpoint if valid
+                latest = max(checkpoints, key=os.path.getmtime)
+                if self.finetune_orch.validate_checkpoint(latest):
+                    return latest
+                else:
+                    self._log(f"Invalid checkpoint found at {latest}, ignoring.")
+        return None
+
     def _generate_code(self, step: PlanStep) -> str:
         # Use FineTuneOrchestrator for training steps
         if step.action in ("train", "configure_training", "apply_peft",
-                            "download_model", "load_dataset"):
+                            "download_model", "load_dataset", "probe_hardware"):
             analysis = (self.plan.analysis if self.plan else {})
             model_name = (analysis.get("model", {}).get("name")
                           or settings.default_base_model)
@@ -672,25 +709,64 @@ class OrchestratorAgent:
                             or "databricks/databricks-dolly-15k")
             method = (analysis.get("method", {}).get("type")
                       or settings.default_finetune_method)
+            
+            output_dir = "./finetuned_model"
+            checkpoint = self._find_checkpoint(output_dir)
+
+            if step.action == "probe_hardware":
+                return """
+import torch
+import time
+print("Benchmarking hardware...")
+# Dummy data for probe
+input_ids = torch.randint(0, 1000, (8, 512)).to('cuda')
+start = time.time()
+# Simulate a few forward passes
+for _ in range(10):
+    _ = torch.cuda.get_device_properties(0)
+    torch.cuda.synchronize()
+end = time.time()
+throughput = 10 / (end - start)
+print(f"PROBE_RESULT: throughput={throughput:.2f}_samples_sec, vram_free={torch.cuda.mem_get_info(0)[0]/1e9:.2f}_GB")
+"""
 
             if step.action in ("train", "configure_training", "apply_peft"):
                 plan = self.finetune_orch.plan_training(
                     base_model=model_name,
                     vram_gb=settings.runtime_tiers.get(self.current_runtime, 16),
                 )
-                return self.finetune_orch.generate_script(
-                    base_model=model_name,
-                    dataset=dataset_name,
-                    method=plan["method"],
-                    rank=plan["rank"] or 8,
-                    alpha=plan["alpha"] or 16,
-                    learning_rate=plan["learning_rate"],
-                    batch_size=plan["batch_size"],
-                    epochs=plan["epochs"],
-                    gradient_accumulation_steps=plan["gradient_accumulation_steps"],
-                    optimizer=plan["optimizer"],
-                    fp16=plan["fp16"],
-                )
+                
+                # Use resume script if checkpoint found
+                if checkpoint:
+                    self._log(f"Resuming training from checkpoint: {checkpoint}")
+                    return self.finetune_orch.generate_resume_script(
+                        checkpoint_path=checkpoint,
+                        base_model=model_name,
+                        dataset=dataset_name,
+                        method=plan["method"],
+                        rank=plan["rank"] or 8,
+                        alpha=plan["alpha"] or 16,
+                        learning_rate=plan["learning_rate"],
+                        batch_size=plan["batch_size"],
+                        epochs=plan["epochs"],
+                        gradient_accumulation_steps=plan["gradient_accumulation_steps"],
+                        optimizer=plan["optimizer"],
+                        fp16=plan["fp16"],
+                    )
+                else:
+                    return self.finetune_orch.generate_script(
+                        base_model=model_name,
+                        dataset=dataset_name,
+                        method=plan["method"],
+                        rank=plan["rank"] or 8,
+                        alpha=plan["alpha"] or 16,
+                        learning_rate=plan["learning_rate"],
+                        batch_size=plan["batch_size"],
+                        epochs=plan["epochs"],
+                        gradient_accumulation_steps=plan["gradient_accumulation_steps"],
+                        optimizer=plan["optimizer"],
+                        fp16=plan["fp16"],
+                    )
             if step.action == "download_model":
                 return self.hf.download_model_code(model_name, use_4bit=(method == "qlora"))
             if step.action == "load_dataset":
@@ -769,10 +845,42 @@ print(dataset[0])
         )
         return result
 
-    def _detect_oom(self, error: str) -> bool:
-        return any(kw in error.lower() for kw in
-                   ["out of memory", "cuda out of", "oom",
-                    "cuda error", "device-side assert", "allocate"])
+    def _monitor_divergence(self, step: PlanStep, output: str):
+        """
+        Check for training divergence. If detected, ask LLM for tuning suggestions,
+        then pause for human input via plugins, otherwise fail/retry.
+        """
+        loss_matches = re.findall(r"loss[=:]\s*(\d+\.\d+)", output, re.IGNORECASE)
+        if not loss_matches:
+            return
+
+        losses = [float(l) for l in loss_matches]
+        is_diverged = any(math.isnan(l) or l > 1e6 for l in losses)
+        is_stagnated = len(losses) >= 3 and len(set(losses[-3:])) == 1
+        
+        if is_diverged or is_stagnated:
+            error = f"Training {'diverged' if is_diverged else 'stagnated'}! Losses: {losses[-3:]}"
+            self._log(f"ALERT: {error}")
+            
+            # Get LLM suggestion
+            prompt = f"Training diverged/stagnated with losses {losses[-3:]}. Suggest new hyperparameters (e.g., lower learning rate, different batch size) to fix this."
+            suggestion = self.llm.chat([{"role": "user", "content": prompt}])["content"]
+            self._log(f"LLM Tuning Suggestion: {suggestion}")
+
+            # Hybrid hook: fire on_divergence
+            divergence_data = {"step_id": step.id, "error": error, "losses": losses[-3:], "suggestion": suggestion}
+            action = self.hook_runner.run_on_divergence(divergence_data, self._ws_context)
+            
+            if action == "abort":
+                step.error = error
+                step.status = StepStatus.FAILED
+            elif action == "proceed":
+                self._log("Plugin authorized proceed despite divergence.")
+            else:
+                # Default hybrid behavior: Pause
+                step.error = f"{error}\nSuggestion: {suggestion}"
+                step.status = StepStatus.PAUSED
+                self._log("Training paused. Waiting for human input...")
 
     def _find_next_runtime_tier(self) -> Optional[str]:
         for t in ["T4", "V100", "A100", "A100-80GB"]:

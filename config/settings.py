@@ -29,7 +29,7 @@ class Settings(BaseSettings):
 
     # ── LLM Provider ───────────────────────────────────────────────
     llm_provider: Literal["openai", "anthropic", "gemini", "local"] = "openai"
-    llm_model: str = "gpt-4"
+    llm_model: str = "meta/llama-3.1-70b-instruct" # Upgraded from gpt-4/8b default
     openai_api_key: Optional[str] = None
     openai_base_url: Optional[str] = None
     anthropic_api_key: Optional[str] = None

@@ -396,6 +396,9 @@ class AuditLogger:
         self._sink = sink
         self._lock = threading.Lock()
         self._session_id = hashlib.md5(str(time.time()).encode()).hexdigest()[:8]
+        # Secret key for audit trail signing
+        self.secret = (os.environ.get("COLAB_AGENT_AUDIT_SECRET") or 
+                       settings.hf_token or "colab-agent-audit-seed").encode()
 
     def record(self, category: str, action: str, detail: str = "",
                actor: str = "system", context: Optional[dict] = None,
@@ -411,6 +414,10 @@ class AuditLogger:
             "level": level,
             "context": context or {},
         }
+        # Compute HMAC signature
+        entry_json = json.dumps(entry, sort_keys=True).encode()
+        entry["signature"] = hmac.new(self.secret, entry_json, hashlib.sha256).hexdigest()
+        
         with self._lock:
             try:
                 os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)

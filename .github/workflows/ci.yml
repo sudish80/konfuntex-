@@ -23,6 +23,12 @@ jobs:
           pip install ruff
       - name: Lint with ruff
         run: ruff check . --exclude capabilities
+      - name: Run Snyk vulnerability scan
+        uses: snyk/actions/python@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high
 
   test:
     runs-on: ubuntu-latest
