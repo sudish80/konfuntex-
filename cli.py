@@ -49,6 +49,7 @@ MetricsStore = MetricsStore
 console = Console()
 
 ACCENT = "bright_magenta"
+HEADER = "bold bright_magenta"
 DIM = "dim"
 SUCCESS = "bright_green"
 ERROR = "bright_red"
@@ -672,6 +673,206 @@ def cmd_migrate(revision: str = "head"):
     _ok("Migrations complete")
 
 
+def cmd_colab_automate():
+    """Drive Colab browser automation via Playwright."""
+    from colab.automation import ColabAutomation
+    import json
+
+    console.print(f"[{HEADER}]Colab Automation[/{HEADER}]")
+    url = Prompt.ask(f"[{ACCENT}]Notebook URL[/{ACCENT}]",
+                     default="https://colab.research.google.com/#create=true")
+    headless = Confirm.ask(f"[{ACCENT}]Headless mode?[/{ACCENT}]", default=True)
+
+    with ColabAutomation(headless=headless) as auto:
+        if not auto.is_available():
+            console.print(f"[{WARN}]Playwright not installed. Install: pip install playwright && playwright install chromium[/{WARN}]")
+            return
+
+        result = auto.open_notebook(url)
+        console.print(json.dumps(result, indent=2))
+
+        if result.get("success"):
+            auto.wait_for_connection(timeout=60)
+            runtime = auto.detect_runtime()
+            console.print(f"[green]Runtime: {runtime}[/green]")
+
+            target = Prompt.ask(f"[{ACCENT}]Switch to GPU[/{ACCENT}]",
+                                choices=["None", "T4", "V100", "A100", "A100-80GB", "skip"], default="skip")
+            if target != "skip":
+                sr = auto.switch_runtime(target)
+                console.print(json.dumps(sr, indent=2))
+
+
+def cmd_colab_sync():
+    """Start Drive sync daemon."""
+    from colab.drive_sync import DriveSyncDaemon
+    import json
+    import time
+
+    console.print(f"[{HEADER}]Drive Sync Daemon[/{HEADER}]")
+    job_id = Prompt.ask(f"[{ACCENT}]Job ID[/{ACCENT}]", default="default")
+    interval = int(Prompt.ask(f"[{ACCENT}]Sync interval (seconds)[/{ACCENT}]", default="60"))
+
+    d = DriveSyncDaemon(job_id=job_id)
+    d.start(interval=interval)
+    console.print(f"[green]Sync daemon started (job={job_id}, interval={interval}s)[/green]")
+
+    try:
+        while True:
+            time.sleep(interval)
+            status = d.status
+            console.print(f"  Sync #{status['sync_count']}: last={status['last_sync']}, versions={len(d.list_versions())}")
+    except KeyboardInterrupt:
+        console.print(f"\n[{WARN}]Stopping...[/{WARN}]")
+    finally:
+        d.stop()
+        console.print("[green]Sync daemon stopped[/green]")
+
+
+def cmd_colab_resume():
+    """Detect and generate resume code from Drive checkpoints."""
+    from colab.resumer import ColabResumer
+    import json
+
+    console.print(f"[{HEADER}]Colab Resume Detector[/{HEADER}]")
+    drive_dir = Prompt.ask(f"[{ACCENT}]Drive directory[/{ACCENT}]",
+                           default="/content/drive/MyDrive/colab-agent")
+
+    r = ColabResumer(drive_dir=drive_dir)
+    state = r.detect_previous_run()
+
+    if state.get("has_checkpoint"):
+        console.print(f"[green]Checkpoint found![/green]")
+        console.print(f"  Job: {state.get('job_id')}")
+        console.print(f"  Version: v{state.get('checkpoint_version')}")
+        console.print(f"  Model: {state.get('model_name')}")
+        console.print(f"  Dataset: {state.get('dataset_name')}")
+        console.print(f"  Epochs completed: {state.get('epochs_completed')}")
+        console.print(f"  Last loss: {state.get('last_loss')}")
+
+        if Confirm.ask(f"[{ACCENT}]Generate resume code?[/{ACCENT}]", default=True):
+            code = r.build_resume_code(state)
+            print("\n" + code)
+    else:
+        console.print(f"[{WARN}]No checkpoint found: {state.get('error', 'unknown')}[/{WARN}]")
+
+
+def cmd_colab_remote():
+    """Execute code in Colab via Playwright automation (no manual steps)."""
+    from colab.remote_executor import RemoteColabExecutor
+
+    console.print(f"[{HEADER}]Remote Colab Executor[/{HEADER}]")
+    if not RemoteColabExecutor._check_playwright():
+        console.print(f"[{WARN}]Playwright not installed. Install: pip install playwright && playwright install chromium[/{WARN}]")
+        return
+
+    headless = not Confirm.ask(f"[{ACCENT}]Show browser window?[/{ACCENT}]", default=True)
+
+    with RemoteColabExecutor(headless=headless) as executor:
+        console.print("[green]Connecting to Colab...[/green]")
+        conn = executor.connect(timeout=60)
+        if not conn.get("success"):
+            console.print(f"[{ERR}]Connection failed: {conn.get('error')}[/{ERR}]")
+            return
+
+        console.print(f"[green]Connected! Runtime ready: {conn.get('runtime_ready')}[/green]")
+
+        while True:
+            code = Prompt.ask(f"[{ACCENT}]Code to execute (or 'quit')[/{ACCENT}]")
+            if code.lower() in ("quit", "exit", "q"):
+                break
+
+            console.print("[yellow]Executing...[/yellow]")
+            result = executor.execute(code, timeout=120)
+            if result.get("success"):
+                console.print(f"[green]Output:[/green]")
+                print(result.get("output", "")[:2000])
+            else:
+                console.print(f"[{ERR}]Error: {result.get('error')}[/{ERR}]")
+                if result.get("output"):
+                    print(result["output"][:500])
+
+        console.print("[green]Disconnected.[/green]")
+
+
+def cmd_colab_enterprise():
+    """Manage Colab Enterprise runtimes."""
+    from colab.enterprise import ColabEnterprise
+    import json
+
+    console.print(f"[{HEADER}]Colab Enterprise[/{HEADER}]")
+    project = Prompt.ask(f"[{ACCENT}]Google Cloud project[/{ACCENT}]",
+                         default=os.environ.get("GOOGLE_CLOUD_PROJECT", ""))
+
+    e = ColabEnterprise(project=project)
+    if not e.is_available():
+        console.print(f"[{WARN}]SDK not available. Install: pip install google-cloud-aiplatform[/{WARN}]")
+        return
+
+    while True:
+        action = Prompt.ask(
+            f"[{ACCENT}]Action[/{ACCENT}]",
+            choices=["list", "create", "delete", "setup-code", "quit"],
+            default="list",
+        )
+        if action == "quit":
+            break
+        elif action == "list":
+            runtimes = e.list_runtimes()
+            console.print(json.dumps(runtimes, indent=2))
+        elif action == "create":
+            spec = Prompt.ask(f"[{ACCENT}]Runtime spec[/{ACCENT}]",
+                              choices=["T4", "V100", "A100", "A100-80GB", "TPU"], default="T4")
+            result = e.create_runtime(spec)
+            console.print(json.dumps(result, indent=2))
+        elif action == "delete":
+            name = Prompt.ask(f"[{ACCENT}]Runtime name[/{ACCENT}]")
+            result = e.delete_runtime(name)
+            console.print(json.dumps(result, indent=2))
+        elif action == "setup-code":
+            print(e.generate_setup_code())
+
+    console.print("[green]Done[/green]")
+
+
+def cmd_detect():
+    """Detect hardware and recommend best model."""
+    from models.selector import ModelSelector, print_model_summary
+    sel = ModelSelector()
+    print_model_summary(sel)
+
+
+def cmd_list_models_spec():
+    """List all supported models with hardware requirements."""
+    from models.selector import MODEL_REGISTRY
+    import json
+
+    console.print(f"[{HEADER}]Supported Models ({len(MODEL_REGISTRY)} total)[/{HEADER}]")
+
+    by_tier = {}
+    for spec in MODEL_REGISTRY:
+        by_tier.setdefault(spec.tier.value, []).append(spec)
+
+    tier_order = ["none", "low", "medium", "high", "very_high", "extreme"]
+    for tier_val in tier_order:
+        specs = by_tier.get(tier_val, [])
+        if not specs:
+            continue
+        console.print(f"\n[bold]{tier_val.upper().replace('_', ' ')} tier[/bold]")
+        for s in specs:
+            needs = []
+            if s.requires_auth:
+                needs.append("HF auth")
+            print(f"  {s.name}")
+            print(f"    {s.params_b:.1f}B params | "
+                  f"LoRA {s.vram_gb_lora:.0f}GB | "
+                  f"QLoRA {s.vram_gb_qlora:.0f}GB | "
+                  f"Full {s.vram_gb_full:.0f}GB VRAM | "
+                  f"{s.context_window} ctx")
+            if needs:
+                print(f"    Needs: {', '.join(needs)}")
+
+
 def cmd_backup_sqlite(path: str = None):
     """Backup SQLite database file."""
     from config.settings import settings
@@ -700,6 +901,8 @@ def main():
   convs                 list conversations
   config                show configuration
   colab                 print Colab setup script
+  detect                detect hardware + auto-select best model
+  list-models           list all supported models with VRAM requirements
   serve [host] [port]   start HTTP service
   backup [path]         export data to JSON
   restore <path>        restore from JSON
@@ -710,8 +913,8 @@ def main():
     parser.add_argument("--model", help="base model id")
     parser.add_argument("--dataset", help="dataset id")
     parser.add_argument("--method", choices=["lora", "qlora", "full"])
-    parser.add_argument("--executor", choices=["local", "colab", "auto"], default="auto",
-                        help="Execution environment: local (persistent kernel), colab (remote), auto (detect)")
+    parser.add_argument("--executor", choices=["local", "colab", "auto", "remote"], default="auto",
+                        help="Execution environment: local (persistent kernel), colab (upload code), remote (Playwright auto), auto (detect)")
 
     args = parser.parse_args()
     cmd = args.command
@@ -730,6 +933,13 @@ def main():
         "conv":         lambda: cmd_show_conv(extra[0]) if extra else _fail("need conv id"),
         "config":       lambda: cmd_config(),
         "colab":        lambda: cmd_colab_code(),
+        "colab-automate":  lambda: cmd_colab_automate(),
+        "colab-sync":      lambda: cmd_colab_sync(),
+        "colab-resume":    lambda: cmd_colab_resume(),
+        "colab-enterprise": lambda: cmd_colab_enterprise(),
+        "colab-remote":      lambda: cmd_colab_remote(),
+        "detect":       lambda: cmd_detect(),
+        "list-models":  lambda: cmd_list_models_spec(),
         "backup":       lambda: cmd_backup(" ".join(extra) if extra else None),
         "restore":      lambda: cmd_restore(extra[0]) if extra else _fail("usage: restore <path>"),
         "serve":        lambda: cmd_serve(

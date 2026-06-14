@@ -1,18 +1,20 @@
 import json
 import time
 import random
-import re
-# ...
-def exponential_backoff(attempt: int, base_delay: float = 1.0, max_delay: float = 30.0):
-    delay = min(base_delay * (2 ** attempt), max_delay)
-    time.sleep(delay + random.uniform(0, 0.1 * delay))
 import os
+import re
 import uuid
+import threading
 import logging
 import tempfile
 from typing import Optional, Callable
 from datetime import datetime, timezone
 from colab.local_kernel import LocalIPythonRunner
+
+
+def exponential_backoff(attempt: int, base_delay: float = 1.0, max_delay: float = 30.0):
+    delay = min(base_delay * (2 ** attempt), max_delay)
+    time.sleep(delay + random.uniform(0, 0.1 * delay))
 
 logger = logging.getLogger(__name__)
 
@@ -86,9 +88,19 @@ class ColabRunner:
     """
     Manages Colab notebook creation, code execution, and runtime detection.
 
-    Designed to work both:
-      - Remotely: generates .ipynb files and uploads to Google Drive via PyDrive
-      - Locally (simulation): for testing without a real Colab environment
+    Execution modes:
+      - auto:    checks COLAB_AGENT_SIMULATE env var (default simulate=True)
+      - local:   persistent LocalIPythonRunner kernel (jupyter_client)
+      - colab:   simulation mode; generates upload code for manual Colab use
+      - remote:  fully automated via Playwright browser (no manual steps)
+
+    Fallback chain (remote mode):
+        1. RemoteColabExecutor (Playwright → headless Chromium → Colab.com)
+        2. LocalIPythonRunner (persistent local kernel)
+        3. Simulate (AST validation + heuristic output)
+
+    The `remote` mode is the most powerful: opens headless Chromium, connects
+    to Colab, executes code via CodeMirror JS API + keyboard automation.
     """
 
     def __init__(self, drive_folder_id: Optional[str] = None, executor: str = "auto"):
@@ -97,22 +109,145 @@ class ColabRunner:
         self.active_notebook_id = None
         self.active_notebook_url = None
         self.execution_history = []
-        
+
+        self._lock = threading.RLock()
+        self._local_kernel = None
+        self._remote_executor = None
+        self._mode = executor
+        self._connected = False
+        self._fallback_reason = None
+
         # Determine execution mode
         if executor == "auto":
             self.simulate = os.environ.get("COLAB_AGENT_SIMULATE", "True").lower() == "true"
         elif executor == "local":
-            self.simulate = False  # Use local persistent kernel
+            self.simulate = False
         elif executor == "colab":
-            self.simulate = True  # Use Colab remote execution
+            self.simulate = True
+        elif executor == "remote":
+            self.simulate = False
         else:
             self.simulate = os.environ.get("COLAB_AGENT_SIMULATE", "True").lower() == "true"
-        self._local_kernel = None # Persistent kernel for local mode
+
+    # ------------------------------------------------------------------ #
+    #  Lifecycle
+    # ------------------------------------------------------------------ #
+
+    def connect(self) -> dict:
+        """
+        Connect the selected executor.
+
+        - remote:  opens headless Chromium → Colab (with fallback chain)
+        - local:   starts persistent jupyter_client kernel
+        - colab:   no-op (manual upload)
+
+        Returns status dict.
+        """
+        with self._lock:
+            if self._connected:
+                return {"success": True, "mode": self._mode, "fallback": self._fallback_reason}
+
+            if self._mode == "remote":
+                return self._connect_remote()
+            elif self._mode == "local":
+                return self._connect_local()
+            else:
+                self._connected = True
+                return {"success": True, "mode": "colab", "fallback": None}
+
+    def disconnect(self):
+        """Shut down the active executor. Idempotent."""
+        with self._lock:
+            self._disconnect()
+
+    def _disconnect(self):
+        try:
+            if self._remote_executor:
+                self._remote_executor.disconnect()
+        except Exception:
+            pass
+        try:
+            if self._local_kernel:
+                self._local_kernel.shutdown()
+        except Exception:
+            pass
+        self._remote_executor = None
+        self._local_kernel = None
+        self._connected = False
+
+    def __enter__(self):
+        self.connect()
+        return self
+
+    def __exit__(self, *args):
+        self.disconnect()
+        return False
+
+    # ------------------------------------------------------------------ #
+    #  Connection helpers
+    # ------------------------------------------------------------------ #
+
+    def _connect_remote(self) -> dict:
+        """Connect remote executor with fallback chain."""
+        from colab.remote_executor import RemoteColabExecutor
+
+        # Step 1: Try Playwright
+        executor = RemoteColabExecutor(headless=True)
+        self._remote_executor = executor
+
+        if executor.available:
+            result = executor.connect()
+            if result.get("success"):
+                self._connected = True
+                self._fallback_reason = None
+                logger.info("Remote executor connected via Playwright browser")
+                return {"success": True, "mode": "remote", "fallback": None}
+            else:
+                logger.warning(f"Remote executor failed: {result.get('error')}")
+        else:
+            logger.warning("Playwright not installed")
+
+        # Step 2: Fallback to local kernel
+        logger.info("Falling back to local kernel")
+        self._mode = "local"
+        local_result = self._connect_local()
+        if local_result.get("success"):
+            self._fallback_reason = "remote_unavailable"
+            return local_result
+
+        # Step 3: Fallback to simulate
+        logger.info("Local kernel unavailable, falling back to simulation")
+        self._mode = "colab"
+        self.simulate = True
+        self._connected = True
+        self._fallback_reason = "local_unavailable"
+        return {"success": True, "mode": "colab", "fallback": "remote_unavailable"}
+
+    def _connect_local(self) -> dict:
+        """Start a persistent local IPython kernel."""
+        try:
+            self._local_kernel = LocalIPythonRunner()
+            self._connected = True
+            return {"success": True, "mode": "local"}
+        except Exception as e:
+            logger.error(f"Failed to start local kernel: {e}")
+            return {"success": False, "error": str(e)}
 
     def _get_local_kernel(self):
         if self._local_kernel is None:
             self._local_kernel = LocalIPythonRunner()
         return self._local_kernel
+
+    def _get_remote_executor(self):
+        """Lazy-init the remote Playwright executor with fallback."""
+        if self._remote_executor is None:
+            from colab.remote_executor import RemoteColabExecutor
+            self._remote_executor = RemoteColabExecutor(headless=True)
+            result = self._remote_executor.connect()
+            if not result.get("success"):
+                logger.warning(f"Remote executor connect failed: {result.get('error')}")
+                raise RuntimeError(result.get("error", "remote unavailable"))
+        return self._remote_executor
 
     # ------------------------------------------------------------------ #
     #  1. create_notebook
@@ -282,10 +417,12 @@ print(f"Open: https://colab.research.google.com/drive/{{f['id']}}")
         start = time.time()
         cell_id = str(uuid.uuid4())[:8]
 
-        logger.info(f"execute_cell [{cell_id}] {'(sim) ' if self.simulate else ''}"
+        logger.info(f"execute_cell [{cell_id}] ({self._mode}) "
                     f"desc={description}, {len(code)} chars, timeout={timeout}s")
 
-        if self.simulate:
+        if self._mode == "remote":
+            result = self._execute_remote(code, timeout)
+        elif self.simulate:
             result = self._simulate_cell(code, timeout)
         else:
             result = self._execute_in_colab(code, timeout)
@@ -384,6 +521,44 @@ print(f"Open: https://colab.research.google.com/drive/{{f['id']}}")
             "execution_time": 0.3,
         }
 
+    def _execute_remote(self, code: str, timeout: int) -> dict:
+        """Execute code via remote Playwright-based Colab executor.
+
+        Fallback chain on failure:
+            1. Try Playwright
+            2. Try local kernel (jupyter_client)
+            3. Simulate (AST + heuristic)
+        """
+        try:
+            executor = self._get_remote_executor()
+            if not executor.available:
+                logger.warning("Remote executor unavailable; falling back to local kernel")
+                return self._try_fallback(code, timeout, "remote unavailable")
+            return executor.execute(code, timeout=timeout)
+        except Exception as e:
+            logger.error(f"Remote execution failed: {e}")
+            return self._try_fallback(code, timeout, str(e))
+
+    def _try_fallback(self, code: str, timeout: int, reason: str) -> dict:
+        """Attempt fallback chain: local kernel → simulation."""
+        logger.info(f"Fallback triggered ({reason})")
+        try:
+            if self._local_kernel is None:
+                self._local_kernel = LocalIPythonRunner()
+            result = self._local_kernel.execute(code, timeout)
+            if result.get("success"):
+                self._mode = "local"
+                self._fallback_reason = reason
+                return result
+        except Exception as e2:
+            logger.warning(f"Local kernel fallback failed: {e2}")
+
+        self._mode = "colab"
+        self.simulate = True
+        self._fallback_reason = reason
+        logger.info("All fallbacks exhausted; simulating")
+        return self._simulate_cell(code, timeout)
+
     def _execute_in_colab(self, code: str, timeout: int) -> dict:
         """
         Executes code in a persistent kernel.
@@ -391,7 +566,7 @@ print(f"Open: https://colab.research.google.com/drive/{{f['id']}}")
         # If we are NOT in Colab, use persistent local kernel
         if not os.environ.get("COLAB_GPU"):
             return self._get_local_kernel().execute(code, timeout)
-            
+
         # Otherwise, run inside Colab runtime using IPython magic.
         try:
             from IPython import get_ipython

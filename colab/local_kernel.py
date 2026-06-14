@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 
 class LocalIPythonRunner:
     """Manages a persistent local IPython kernel for stateful execution."""
-    
+
     def __init__(self):
         self.km = KernelManager()
         self.km.start_kernel()
@@ -21,10 +21,10 @@ class LocalIPythonRunner:
         """Executes code in the persistent kernel."""
         # Clear stdout/stderr queue
         msg_id = self.kc.execute(code)
-        
+
         output = []
         error = None
-        
+
         start = time.time()
         while (time.time() - start) < timeout:
             try:
@@ -32,7 +32,7 @@ class LocalIPythonRunner:
                 msg = self.kc.get_iopub_msg(timeout=1)
                 msg_type = msg['header']['msg_type']
                 content = msg.get('content', {})
-                
+
                 if msg_type == 'stream':
                     output.append(content.get('text', ''))
                 elif msg_type == 'execute_result' or msg_type == 'display_data':
@@ -45,7 +45,7 @@ class LocalIPythonRunner:
                     break
             except queue.Empty:
                 continue
-                
+
         return {
             "success": error is None,
             "output": "".join(output),

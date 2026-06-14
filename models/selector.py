@@ -1,501 +1,693 @@
 """
-Phase 3 — HuggingFace Integration items 26-35.
+Model Selector — Automatically chooses the best model for available hardware.
 
-Provides:
-  - HFModelSelector         auto-pick model based on task + memory  (item 26)
-  - DatasetLoader           HF datasets, JSON, CSV, Parquet, GDrive (item 27)
-  - ModelSizeEstimator      predict VRAM/RAM before loading         (item 28)
-  - TokenizerManager        padding/truncation auto-config          (item 29)
-  - CacheManager            reuse downloaded models                 (item 30)
-  - HFHubPusher             authentication + version tagging        (item 31)
-  - ModelCardGenerator      auto-create README                     (item 32)
-  - AdapterMerger           LoRA -> full model merge                (item 33)
-  - QuantizationSelector    4-bit / 8-bit / none based on runtime   (item 34)
-  - ModelDownloadProgressBar with ETA                               (item 35)
+Usage:
+    selector = ModelSelector()
+    best = selector.best_fit(vram_gb=16, ram_gb=12)
+    # => {"name": "unsloth/phi-4", "params_b": 14.7, "method": "lora", ...}
+
+    selector = ModelSelector()
+    all_fitting = selector.models_that_fit(vram_gb=8, ram_gb=8)
+    # => [{"name": "google/gemma-2-2b", ...}, ...]
+
+The selector works in both local and Colab mode by reading runtime info
+from ColabRuntimeInfo or directly from torch/nvidia-smi.
 """
+
 import os
+import re
 import json
+import time
+import logging
+import threading
 from typing import Optional
+from dataclasses import dataclass, field, asdict
+from enum import Enum
 
-from config.settings import settings
-
-
-# ==================================================================== #
-#  26 — HFModelSelector
-# ==================================================================== #
-
-TASK_MODEL_MAP = {
-    "text-generation": [
-        "microsoft/phi-2", "microsoft/Phi-3-mini-4k-instruct",
-        "mistralai/Mistral-7B-v0.1", "meta-llama/Llama-2-7b-hf",
-        "google/gemma-2b", "google/gemma-7b",
-        "HuggingFaceH4/zephyr-7b-beta", "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-    ],
-    "text-classification": [
-        "distilbert-base-uncased", "bert-base-uncased",
-        "roberta-base", "cardiffnlp/twitter-roberta-base-sentiment-latest",
-    ],
-    "token-classification": [
-        "dbmdz/bert-large-cased-finetuned-conll03-english",
-        "dslim/bert-base-NER", "Jean-Baptiste/roberta-large-ner-english",
-    ],
-    "question-answering": [
-        "distilbert-base-cased-distilled-squad",
-        "bert-large-uncased-whole-word-masking-finetuned-squad",
-    ],
-    "summarization": [
-        "facebook/bart-large-cnn", "google/pegasus-xsum",
-        "Falconsai/text_summarization",
-    ],
-    "translation": [
-        "Helsinki-NLP/opus-mt-en-fr", "facebook/nllb-200-distilled-600M",
-    ],
-    "code-generation": [
-        "microsoft/phi-2", "codellama/CodeLlama-7b-hf",
-        "bigcode/starcoder2-3b", "bigcode/starcoder2-7b",
-        "deepseek-ai/deepseek-coder-1.3b-instruct",
-    ],
-    "image-classification": [
-        "google/vit-base-patch16-224", "microsoft/resnet-50",
-    ],
-}
+logger = logging.getLogger(__name__)
 
 
-class HFModelSelector:
-    """Auto-pick the best model for a task given runtime constraints."""
-
-    @staticmethod
-    def recommend(task: str, vram_gb: float = 16.0,
-                  prefer_small: bool = False) -> list[dict]:
-        candidates = TASK_MODEL_MAP.get(task, TASK_MODEL_MAP["text-generation"])
-        from models.configs import estimate_memory
-        results = []
-        for model in candidates:
-            info = estimate_memory(model)
-            vram_needed = info["parameters_b"] * (0.5 if vram_gb < 32 else 1.5)
-            fits = vram_needed <= vram_gb * 0.9
-            results.append({
-                "name": model,
-                "params_b": info["parameters_b"],
-                "label": info["label"],
-                "vram_estimate_gb": round(vram_needed, 1),
-                "fits_on_current_runtime": fits,
-            })
-        results.sort(key=lambda x: (not x["fits_on_current_runtime"],
-                                     x["params_b"] if prefer_small else -x["params_b"]))
-        return results
-
-    @staticmethod
-    def best_fit(task: str, vram_gb: float = 16.0) -> Optional[str]:
-        candidates = HFModelSelector.recommend(task, vram_gb)
-        for c in candidates:
-            if c["fits_on_current_runtime"]:
-                return c["name"]
-        return candidates[0]["name"] if candidates else "microsoft/phi-2"
-
-    @staticmethod
-    def selector_code(task: str, vram_gb: float = 16.0) -> str:
-        best = HFModelSelector.best_fit(task, vram_gb)
-        return f"""
-from models.selector import HFModelSelector
-task = "{task}"
-candidates = HFModelSelector.recommend(task, vram_gb={vram_gb})
-print(f"Best model for {{task}}: {{candidates[0]['name']}}" if candidates else "No model found")
-MODEL_NAME = "{best}"
-"""
+class HardwareTier(Enum):
+    """GPU capability tiers for model matching."""
+    NONE = "none"           # CPU only
+    LOW = "low"             # ~8GB or less (T4 low mem, K80)
+    MEDIUM = "medium"       # ~16GB (T4, P100)
+    HIGH = "high"           # ~32-40GB (V100, A10G)
+    VERY_HIGH = "very_high" # ~80GB (A100-80GB, H100)
+    EXTREME = "extreme"     # 80GB+ (multi-GPU, H200)
 
 
-# ==================================================================== #
-#  27 — DatasetLoader
-# ==================================================================== #
+@dataclass
+class ModelSpec:
+    """Spec for a single model variant."""
+    name: str                      # HuggingFace model ID
+    family: str                    # Model family (llama, phi, gemma, etc.)
+    params_b: float                # Parameter count in billions
+    vram_gb_lora: float            # Minimum VRAM for LoRA fine-tuning
+    vram_gb_qlora: float           # Minimum VRAM for QLoRA fine-tuning
+    vram_gb_full: float            # Minimum VRAM for full fine-tuning
+    ram_gb_required: float         # Minimum system RAM
+    context_window: int = 4096     # Max context length
+    requires_auth: bool = False    # Needs HF token
+    tier: HardwareTier = HardwareTier.MEDIUM
+    description: str = ""
 
-class DatasetLoader:
-    """Load datasets from HF Hub, JSON, CSV, Parquet, or Google Drive."""
-
-    SUPPORTED_FORMATS = {".json": "json", ".jsonl": "json",
-                         ".csv": "csv", ".tsv": "csv",
-                         ".parquet": "parquet"}
-
-    @staticmethod
-    def detect_format(path: str) -> str:
-        ext = os.path.splitext(path)[1].lower()
-        return DatasetLoader.SUPPORTED_FORMATS.get(ext, "hf")
-
-    @staticmethod
-    def load_code(path_or_name: str, split: str = "train",
-                  text_column: str = "text",
-                  val_split: float = 0.0) -> str:
-        fmt = DatasetLoader.detect_format(path_or_name)
-
-        if fmt == "hf":
-            val_code = f"""
-split_dataset = dataset.train_test_split(test_size={val_split}) if {val_split} > 0 else {{"train": dataset}}
-""" if val_split > 0 else ""
-            return f"""
-from datasets import load_dataset
-dataset = load_dataset("{path_or_name}", split="{split}")
-print(f"Loaded: {{len(dataset)}} samples")
-print(f"Columns: {{dataset.column_names}}")
-{val_code}
-"""
-
-        elif fmt == "csv":
-            return f"""
-import pandas as pd
-from datasets import Dataset
-df = pd.read_csv("{path_or_name}")
-dataset = Dataset.from_pandas(df)
-print(f"Loaded CSV: {{len(dataset)}} rows, columns: {{list(df.columns)}}")
-"""
-
-        elif fmt == "json":
-            return f"""
-import pandas as pd
-from datasets import Dataset
-df = pd.read_json("{path_or_name}")
-dataset = Dataset.from_pandas(df)
-print(f"Loaded JSON: {{len(dataset)}} rows")
-"""
-
-        elif fmt == "parquet":
-            return f"""
-import pandas as pd
-from datasets import Dataset
-df = pd.read_parquet("{path_or_name}")
-dataset = Dataset.from_pandas(df)
-print(f"Loaded Parquet: {{len(dataset)}} rows")
-"""
-        return f"print('Unknown format for {path_or_name}')"
-
-    @staticmethod
-    def from_drive_code(drive_path: str) -> str:
-        return f"""
-from google.colab import drive
-drive.mount('/content/drive')
-import pandas as pd
-from datasets import Dataset
-path = "{drive_path}"
-ext = path.split('.')[-1]
-if ext == 'csv': df = pd.read_csv(path)
-elif ext == 'json': df = pd.read_json(path)
-else: raise ValueError(f"Unsupported: {{ext}}")
-dataset = Dataset.from_pandas(df)
-print(f"Loaded from Drive: {{len(dataset)}} rows")
-"""
-
-
-# ==================================================================== #
-#  28 — ModelSizeEstimator
-# ==================================================================== #
-
-class ModelSizeEstimator:
-    """Predict memory usage before loading a model."""
-
-    @staticmethod
-    def estimate_vram(model_params_b: float, method: str,
-                      seq_length: int = 512,
-                      batch_size: int = 4) -> dict:
-        from colab.runtime import estimate_needed_vram
-        base = estimate_needed_vram(model_params_b, method)
-        overhead = (seq_length * batch_size * model_params_b * 1e9 * 2 * 4) / 1e9 * 0.1
+    def min_vram(self, method: str = "qlora") -> float:
         return {
-            "model_params_b": model_params_b,
-            "method": method,
-            "vram_model_gb": round(base, 2),
-            "vram_activation_gb": round(overhead, 2),
-            "vram_total_gb": round(base + overhead, 2),
-            "ram_overhead_gb": round(model_params_b * 0.5, 2),
+            "lora": self.vram_gb_lora,
+            "qlora": self.vram_gb_qlora,
+            "full": self.vram_gb_full,
+        }.get(method, self.vram_gb_qlora)
+
+    def fits_in(self, vram_gb: float, ram_gb: float, method: str = "qlora") -> bool:
+        return vram_gb >= self.min_vram(method) and ram_gb >= self.ram_gb_required
+
+
+# ------------------------------------------------------------------ #
+#  Model Registry — curated list of models ranked by capability
+# ------------------------------------------------------------------ #
+
+MODEL_REGISTRY: list[ModelSpec] = [
+    # --- Tiny models (< 3B) — fit anywhere ---
+    ModelSpec(
+        name="google/gemma-2-2b",
+        family="gemma",
+        params_b=2.6,
+        vram_gb_lora=3.0,
+        vram_gb_qlora=2.0,
+        vram_gb_full=8.0,
+        ram_gb_required=4.0,
+        context_window=8192,
+        tier=HardwareTier.LOW,
+        description="Gemma 2 2B — fast, fits in 2GB VRAM with QLoRA",
+    ),
+    ModelSpec(
+        name="microsoft/phi-2",
+        family="phi",
+        params_b=2.7,
+        vram_gb_lora=3.0,
+        vram_gb_qlora=2.0,
+        vram_gb_full=8.0,
+        ram_gb_required=4.0,
+        context_window=2048,
+        tier=HardwareTier.LOW,
+        description="Phi-2 — Microsoft's 2.7B, strong reasoning for size",
+    ),
+    ModelSpec(
+        name="Qwen/Qwen2.5-1.5B",
+        family="qwen",
+        params_b=1.5,
+        vram_gb_lora=2.0,
+        vram_gb_qlora=1.5,
+        vram_gb_full=5.0,
+        ram_gb_required=3.0,
+        context_window=32768,
+        tier=HardwareTier.LOW,
+        description="Qwen 2.5 1.5B — tiny, fast, 32K context",
+    ),
+    ModelSpec(
+        name="microsoft/Phi-3-mini-4k-instruct",
+        family="phi",
+        params_b=3.8,
+        vram_gb_lora=4.0,
+        vram_gb_qlora=3.0,
+        vram_gb_full=12.0,
+        ram_gb_required=6.0,
+        context_window=4096,
+        tier=HardwareTier.LOW,
+        description="Phi-3 Mini 3.8B — excellent reasoning for size",
+    ),
+    ModelSpec(
+        name="HuggingFaceTB/SmolLM2-1.7B-Instruct",
+        family="smollm",
+        params_b=1.7,
+        vram_gb_lora=2.0,
+        vram_gb_qlora=1.5,
+        vram_gb_full=5.0,
+        ram_gb_required=3.0,
+        context_window=2048,
+        tier=HardwareTier.LOW,
+        description="SmolLM2 1.7B — smallest instruct model",
+    ),
+
+    # --- Small models (3B-7B) — fit in T4/P100 ---
+    ModelSpec(
+        name="google/gemma-2-9b",
+        family="gemma",
+        params_b=9.2,
+        vram_gb_lora=8.0,
+        vram_gb_qlora=5.0,
+        vram_gb_full=24.0,
+        ram_gb_required=8.0,
+        context_window=8192,
+        tier=HardwareTier.MEDIUM,
+        description="Gemma 2 9B — good quality, fits T4 with QLoRA",
+    ),
+    ModelSpec(
+        name="mistralai/Mistral-7B-Instruct-v0.3",
+        family="mistral",
+        params_b=7.3,
+        vram_gb_lora=7.0,
+        vram_gb_qlora=4.5,
+        vram_gb_full=20.0,
+        ram_gb_required=8.0,
+        context_window=32768,
+        tier=HardwareTier.MEDIUM,
+        description="Mistral 7B — strong baseline, 32K context",
+    ),
+    ModelSpec(
+        name="meta-llama/Llama-3.2-3B-Instruct",
+        family="llama",
+        params_b=3.2,
+        vram_gb_lora=4.0,
+        vram_gb_qlora=2.5,
+        vram_gb_full=10.0,
+        ram_gb_required=6.0,
+        context_window=8192,
+        tier=HardwareTier.LOW,
+        description="Llama 3.2 3B — Meta's latest small model",
+        requires_auth=True,
+    ),
+    ModelSpec(
+        name="meta-llama/Llama-3.2-1B-Instruct",
+        family="llama",
+        params_b=1.2,
+        vram_gb_lora=2.0,
+        vram_gb_qlora=1.0,
+        vram_gb_full=4.0,
+        ram_gb_required=2.0,
+        context_window=8192,
+        tier=HardwareTier.LOW,
+        description="Llama 3.2 1B — smallest Llama, runs anywhere",
+        requires_auth=True,
+    ),
+    ModelSpec(
+        name="Qwen/Qwen2.5-7B-Instruct",
+        family="qwen",
+        params_b=7.6,
+        vram_gb_lora=7.0,
+        vram_gb_qlora=4.5,
+        vram_gb_full=20.0,
+        ram_gb_required=8.0,
+        context_window=32768,
+        tier=HardwareTier.MEDIUM,
+        description="Qwen 2.5 7B — strong multilingual, 32K context",
+    ),
+
+    # --- Medium models (7B-14B) — need V100/A10G ---
+    ModelSpec(
+        name="unsloth/phi-4",
+        family="phi",
+        params_b=14.7,
+        vram_gb_lora=12.0,
+        vram_gb_qlora=8.0,
+        vram_gb_full=40.0,
+        ram_gb_required=12.0,
+        context_window=16384,
+        tier=HardwareTier.HIGH,
+        description="Phi-4 14.7B — Microsoft's latest, strong reasoning",
+    ),
+    ModelSpec(
+        name="meta-llama/Llama-3.1-8B-Instruct",
+        family="llama",
+        params_b=8.0,
+        vram_gb_lora=8.0,
+        vram_gb_qlora=5.0,
+        vram_gb_full=22.0,
+        ram_gb_required=8.0,
+        context_window=131072,
+        tier=HardwareTier.MEDIUM,
+        description="Llama 3.1 8B — excellent all-rounder, 128K context",
+        requires_auth=True,
+    ),
+    ModelSpec(
+        name="mistralai/Mixtral-8x7B-Instruct-v0.1",
+        family="mixtral",
+        params_b=46.7,
+        vram_gb_lora=32.0,
+        vram_gb_qlora=20.0,
+        vram_gb_full=96.0,
+        ram_gb_required=24.0,
+        context_window=32768,
+        tier=HardwareTier.VERY_HIGH,
+        description="Mixtral 8x7B MoE — strong, needs A100",
+    ),
+    ModelSpec(
+        name="Qwen/Qwen2.5-14B-Instruct",
+        family="qwen",
+        params_b=14.8,
+        vram_gb_lora=12.0,
+        vram_gb_qlora=8.0,
+        vram_gb_full=40.0,
+        ram_gb_required=12.0,
+        context_window=32768,
+        tier=HardwareTier.HIGH,
+        description="Qwen 2.5 14B — strong general model",
+    ),
+    ModelSpec(
+        name="google/gemma-2-27b",
+        family="gemma",
+        params_b=27.2,
+        vram_gb_lora=20.0,
+        vram_gb_qlora=12.0,
+        vram_gb_full=70.0,
+        ram_gb_required=16.0,
+        context_window=8192,
+        tier=HardwareTier.VERY_HIGH,
+        description="Gemma 2 27B — high quality, needs A100",
+    ),
+
+    # --- Large models (14B-70B) — need A100-80GB ---
+    ModelSpec(
+        name="meta-llama/Llama-3.3-70B-Instruct",
+        family="llama",
+        params_b=70.6,
+        vram_gb_lora=48.0,
+        vram_gb_qlora=28.0,
+        vram_gb_full=160.0,
+        ram_gb_required=32.0,
+        context_window=131072,
+        tier=HardwareTier.EXTREME,
+        description="Llama 3.3 70B — best open model, needs big GPU",
+        requires_auth=True,
+    ),
+    ModelSpec(
+        name="Qwen/Qwen2.5-72B-Instruct",
+        family="qwen",
+        params_b=72.7,
+        vram_gb_lora=48.0,
+        vram_gb_qlora=28.0,
+        vram_gb_full=160.0,
+        ram_gb_required=32.0,
+        context_window=32768,
+        tier=HardwareTier.EXTREME,
+        description="Qwen 2.5 72B — strongest Qwen, 32K context",
+    ),
+    ModelSpec(
+        name="deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
+        family="deepseek",
+        params_b=32.0,
+        vram_gb_lora=24.0,
+        vram_gb_qlora=14.0,
+        vram_gb_full=80.0,
+        ram_gb_required=16.0,
+        context_window=8192,
+        tier=HardwareTier.VERY_HIGH,
+        description="DeepSeek R1 Distill 32B — strong reasoning via distillation",
+    ),
+]
+
+# Index by name for fast lookup
+_MODEL_INDEX = {spec.name: spec for spec in MODEL_REGISTRY}
+
+
+# ------------------------------------------------------------------ #
+#  Hardware Detection
+# ------------------------------------------------------------------ #
+
+def detect_hardware() -> dict:
+    """
+    Detect available hardware (GPU, VRAM, RAM) using torch + psutil.
+    Works in both Colab and local environments.
+
+    Returns:
+        dict with keys: gpu_name, vram_total_gb, vram_free_gb,
+                        ram_total_gb, ram_available_gb, cuda_version,
+                        gpu_count, is_tpu, tier
+    """
+    import importlib.util
+    info = {
+        "gpu_name": None,
+        "vram_total_gb": 0.0,
+        "vram_free_gb": 0.0,
+        "ram_total_gb": 0.0,
+        "ram_available_gb": 0.0,
+        "cuda_version": None,
+        "gpu_count": 0,
+        "is_tpu": False,
+        "tier": HardwareTier.NONE.value,
+    }
+
+    # RAM
+    if importlib.util.find_spec("psutil"):
+        import psutil
+        ram = psutil.virtual_memory()
+        info["ram_total_gb"] = round(ram.total / 1e9, 1)
+        info["ram_available_gb"] = round(ram.available / 1e9, 1)
+
+    # GPU
+    if importlib.util.find_spec("torch"):
+        import torch
+        if torch.cuda.is_available():
+            info["gpu_name"] = torch.cuda.get_device_name(0)
+            info["gpu_count"] = torch.cuda.device_count()
+            info["vram_total_gb"] = round(
+                torch.cuda.get_device_properties(0).total_memory / 1e9, 1)
+            info["vram_free_gb"] = round(
+                info["vram_total_gb"] - torch.cuda.memory_allocated(0) / 1e9, 1)
+            info["cuda_version"] = torch.version.cuda
+            info["tier"] = _tier_from_vram(info["vram_total_gb"]).value
+
+        # TPU check
+        try:
+            import torch_xla
+            info["is_tpu"] = True
+            info["tier"] = HardwareTier.HIGH.value
+        except ImportError:
+            pass
+
+    # nvidia-smi fallback if torch not available
+    if not info["gpu_name"]:
+        info.update(_detect_via_nvidia_smi())
+
+    if not info["tier"] or info["tier"] == HardwareTier.NONE.value:
+        if info["vram_total_gb"] > 0:
+            info["tier"] = _tier_from_vram(info["vram_total_gb"]).value
+        elif info["gpu_name"]:
+            info["tier"] = _tier_from_name(info["gpu_name"]).value
+        else:
+            info["tier"] = HardwareTier.NONE.value
+
+    return info
+
+
+def _detect_via_nvidia_smi() -> dict:
+    """Fallback GPU detection via nvidia-smi."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,memory.total,memory.free",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            parts = out.stdout.strip().split(", ")
+            name = parts[0] if len(parts) > 0 else None
+            total_mib = float(parts[1]) if len(parts) > 1 else 0
+            free_mib = float(parts[2]) if len(parts) > 2 else 0
+            return {
+                "gpu_name": name,
+                "vram_total_gb": round(total_mib / 1024, 1),
+                "vram_free_gb": round(free_mib / 1024, 1),
+            }
+    except Exception:
+        pass
+    return {}
+
+
+def _tier_from_vram(vram_gb: float) -> HardwareTier:
+    if vram_gb >= 80:
+        return HardwareTier.EXTREME
+    if vram_gb >= 40:
+        return HardwareTier.VERY_HIGH
+    if vram_gb >= 24:
+        return HardwareTier.HIGH
+    if vram_gb >= 12:
+        return HardwareTier.MEDIUM
+    if vram_gb >= 4:
+        return HardwareTier.LOW
+    return HardwareTier.NONE
+
+
+def _tier_from_name(name: str) -> HardwareTier:
+    name_lower = name.lower()
+    if any(kw in name_lower for kw in ["h100", "h200", "a100-80", "a100 80"]):
+        return HardwareTier.EXTREME
+    if any(kw in name_lower for kw in ["a100", "a10g", "a10", "l40s", "l40"]):
+        return HardwareTier.VERY_HIGH
+    if any(kw in name_lower for kw in ["v100", "v100s", "a6000", "a5000", "rtx 6000"]):
+        return HardwareTier.HIGH
+    if any(kw in name_lower for kw in ["t4", "p100", "rtx 3080", "rtx 3090",
+                                         "rtx 4080", "rtx 4090"]):
+        return HardwareTier.MEDIUM
+    if any(kw in name_lower for kw in ["k80", "p4", "t2", "gtx"]):
+        return HardwareTier.LOW
+    return HardwareTier.NONE
+
+
+# ------------------------------------------------------------------ #
+#  Model Selector
+# ------------------------------------------------------------------ #
+
+class ModelSelector:
+    """
+    Selects the best model for available hardware.
+
+    Thread-safe. Supports both local and Colab hardware detection.
+    Can be called with explicit specs or auto-detect.
+
+    Usage:
+        sel = ModelSelector()
+        result = sel.best_fit()  # auto-detect hardware
+        result = sel.best_fit(vram_gb=16, ram_gb=12, method="lora")
+    """
+
+    def __init__(self, registry: Optional[list[ModelSpec]] = None):
+        self._registry = MODEL_REGISTRY if registry is None else list(registry)
+        self._lock = threading.RLock()
+        self._hardware_cache: Optional[dict] = None
+        self._cache_time = 0.0
+        self._cache_ttl = 30.0  # re-detect every 30s
+
+    @property
+    def registry(self) -> list[ModelSpec]:
+        return self._registry
+
+    # ------------------------------------------------------------------ #
+    #  Detection
+    # ------------------------------------------------------------------ #
+
+    def detect(self, force: bool = False) -> dict:
+        """Detect hardware specs. Cached for cache_ttl seconds."""
+        if force or not self._hardware_cache or \
+           (time.time() - self._cache_time > self._cache_ttl):
+            self._hardware_cache = detect_hardware()
+            self._cache_time = time.time()
+        return dict(self._hardware_cache)
+
+    # ------------------------------------------------------------------ #
+    #  Model selection
+    # ------------------------------------------------------------------ #
+
+    def best_fit(self, vram_gb: Optional[float] = None,
+                 ram_gb: Optional[float] = None,
+                 method: str = "qlora",
+                 prefer_family: Optional[str] = None,
+                 require_context: Optional[int] = None,
+                 exclude_auth: bool = False) -> dict:
+        """
+        Select the best model for available hardware.
+
+        Args:
+            vram_gb: Available VRAM. None = auto-detect.
+            ram_gb: Available RAM. None = auto-detect.
+            method: Fine-tuning method (lora, qlora, full).
+            prefer_family: Optional family to prefer (llama, phi, gemma, etc.).
+            require_context: Minimum context window required.
+            exclude_auth: If True, skip models requiring HF auth.
+
+        Returns:
+            dict with keys: name, family, params_b, method, tier,
+                            vram_needed, fits, explanation
+        """
+        hw = self.detect()
+        vram = vram_gb if vram_gb is not None else hw.get("vram_total_gb", 0)
+        ram = ram_gb if ram_gb is not None else hw.get("ram_total_gb", 0)
+        tier = hw.get("tier", HardwareTier.NONE.value)
+
+        candidates = []
+        for spec in self._registry:
+            if not spec.fits_in(vram, ram, method):
+                continue
+            if require_context and spec.context_window < require_context:
+                continue
+            if exclude_auth and spec.requires_auth:
+                continue
+            if prefer_family and spec.family != prefer_family:
+                continue
+            candidates.append(spec)
+
+        if not candidates:
+            # Try QLoRA if LoRA/full didn't fit
+            if method != "qlora":
+                return self.best_fit(vram_gb, ram_gb, "qlora",
+                                     prefer_family, require_context, exclude_auth)
+
+            # Last resort: no model fits at all
+            if self._registry:
+                smallest = min(self._registry, key=lambda s: s.params_b)
+                return {
+                    "name": smallest.name,
+                    "family": smallest.family,
+                    "params_b": smallest.params_b,
+                    "method": "qlora",
+                    "tier": tier,
+                    "vram_needed": smallest.vram_gb_qlora,
+                    "vram_available": vram,
+                    "ram_available": ram,
+                    "fits": False,
+                    "explanation": (
+                        f"No model fits in {vram:.0f}GB VRAM / {ram:.0f}GB RAM. "
+                        f"Smallest model ({smallest.name}) needs "
+                        f"{smallest.vram_gb_qlora:.0f}GB VRAM."
+                    ),
+                }
+            return {
+                "name": "none",
+                "family": "none",
+                "params_b": 0,
+                "method": "none",
+                "tier": tier,
+                "vram_needed": vram,
+                "vram_available": vram,
+                "ram_available": ram,
+                "fits": False,
+                "explanation": "No models in registry.",
+            }
+
+        # Prefer larger models (sorted by params descending)
+        candidates.sort(key=lambda s: s.params_b, reverse=True)
+
+        for spec in candidates:
+            result = {
+                "name": spec.name,
+                "family": spec.family,
+                "params_b": spec.params_b,
+                "method": method,
+                "tier": spec.tier.value,
+                "vram_total": vram,
+                "vram_needed": spec.min_vram(method),
+                "ram_total": ram,
+                "context_window": spec.context_window,
+                "requires_auth": spec.requires_auth,
+                "fits": True,
+                "explanation": (
+                    f"{spec.name} ({spec.params_b:.1f}B) fits in "
+                    f"{vram:.0f}GB VRAM with {method.upper()}. "
+                    f"Needs {spec.min_vram(method):.0f}GB VRAM."
+                ),
+            }
+            if prefer_family:
+                result["explanation"] += f" Preferred family: {prefer_family}."
+            return result
+
+        smallest = candidates[-1]
+        return {
+            "name": smallest.name,
+            "family": smallest.family,
+            "params_b": smallest.params_b,
+            "method": "qlora",
+            "tier": tier,
+            "vram_needed": smallest.min_vram("qlora"),
+            "vram_available": vram,
+            "ram_available": ram,
+            "fits": False,
+            "explanation": (
+                f"Models need {smallest.min_vram('qlora'):.0f}GB VRAM, "
+                f"but only {vram:.0f}GB available."
+            ),
         }
 
-    @staticmethod
-    def loading_code(model_name: str, method: str = "qlora") -> str:
-        from models.configs import estimate_memory
-        info = estimate_memory(model_name)
-        vram = ModelSizeEstimator.estimate_vram(info["parameters_b"], method)
-        return f"""
-import json, torch
-estimate = {json.dumps(vram)}
-print(f"Estimated VRAM needed: {{estimate['vram_total_gb']}} GB")
-print(f"Available VRAM: {{torch.cuda.get_device_properties(0).total_memory / 1e9:.2f}} GB" if torch.cuda.is_available() else "No GPU")
-if estimate['vram_total_gb'] > (torch.cuda.get_device_properties(0).total_memory / 1e9 if torch.cuda.is_available() else 0):
-    print("WARNING: May not fit in VRAM!")
-else:
-    print("Should fit comfortably")
-"""
+    def models_that_fit(self, vram_gb: Optional[float] = None,
+                        ram_gb: Optional[float] = None,
+                        method: str = "qlora") -> list[dict]:
+        """List all models that fit in the given hardware."""
+        hw = self.detect()
+        vram = vram_gb if vram_gb is not None else hw.get("vram_total_gb", 0)
+        ram = ram_gb if ram_gb is not None else hw.get("ram_total_gb", 0)
+
+        results = []
+        for spec in self._registry:
+            results.append({
+                "name": spec.name,
+                "family": spec.family,
+                "params_b": spec.params_b,
+                "fits": spec.fits_in(vram, ram, method),
+                "vram_needed": spec.min_vram(method),
+                "method": method,
+            })
+        return sorted(results, key=lambda r: -r["params_b"])
+
+    def recommend_method(self, vram_gb: Optional[float] = None,
+                         params_b: float = 7.0) -> str:
+        """Recommend fine-tuning method based on VRAM and model size."""
+        hw = self.detect()
+        vram = vram_gb if vram_gb is not None else hw.get("vram_total_gb", 0)
+
+        if vram >= 40 and params_b < 7:
+            return "full"
+        if vram >= 16 and params_b < 7:
+            return "lora"
+        if vram >= 16 and params_b < 20:
+            return "lora"
+        if vram >= 40 and params_b < 70:
+            return "qlora"
+        return "qlora"
+
+    def get_model(self, name: str) -> Optional[ModelSpec]:
+        """Look up a model in the registry by name."""
+        return _MODEL_INDEX.get(name)
+
+    def register_model(self, spec: ModelSpec):
+        """Add a custom model to the registry (thread-safe)."""
+        with self._lock:
+            self._registry.append(spec)
+            _MODEL_INDEX[spec.name] = spec
+
+    def summary(self, vram_gb: Optional[float] = None,
+                ram_gb: Optional[float] = None) -> dict:
+        """Full hardware + model recommendation summary."""
+        hw = self.detect()
+        vram = vram_gb if vram_gb is not None else hw.get("vram_total_gb", 0)
+        ram = ram_gb if ram_gb is not None else hw.get("ram_total_gb", 0)
+
+        best = self.best_fit(vram, ram)
+        return {
+            "hardware": {
+                "gpu": hw.get("gpu_name", None),
+                "vram_total_gb": hw.get("vram_total_gb", 0),
+                "vram_free_gb": hw.get("vram_free_gb", 0),
+                "ram_total_gb": hw.get("ram_total_gb", 0),
+                "ram_available_gb": hw.get("ram_available_gb", 0),
+                "tier": hw.get("tier", "none"),
+                "cuda": hw.get("cuda_version", None),
+            },
+            "recommended_model": best,
+            "all_fitting": self.models_that_fit(vram, ram, best.get("method", "qlora")),
+        }
 
 
-# ==================================================================== #
-#  29 — TokenizerManager
-# ==================================================================== #
+# ------------------------------------------------------------------ #
+#  CLI helper
+# ------------------------------------------------------------------ #
 
-class TokenizerManager:
-    """Auto-configure padding, truncation, special tokens."""
+def print_model_summary(selector: Optional[ModelSelector] = None):
+    """Print a human-readable hardware + model recommendation."""
+    sel = selector or ModelSelector()
+    summary = sel.summary()
 
-    @staticmethod
-    def auto_config_code(model_name: str, max_length: int = 512) -> str:
-        return f"""
-from transformers import AutoTokenizer
-tokenizer = AutoTokenizer.from_pretrained("{model_name}", trust_remote_code=True)
-# Auto-configure padding
-if tokenizer.pad_token is None:
-    tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.pad_token_id = tokenizer.eos_token_id
-tokenizer.padding_side = "right"
-tokenizer.truncation_side = "right"
-print(f"Tokenizer: vocab_size={{tokenizer.vocab_size}}, max_length={{tokenizer.model_max_length}}")
-print(f"pad_token={{tokenizer.pad_token}}, eos_token={{tokenizer.eos_token}}")
-"""
+    hw = summary["hardware"]
+    print("=== Hardware ===")
+    print(f"  GPU:        {hw.get('gpu') or 'None (CPU)'}")
+    print(f"  VRAM:       {hw['vram_total_gb']:.1f} GB total, "
+          f"{hw['vram_free_gb']:.1f} GB free")
+    print(f"  RAM:        {hw['ram_total_gb']:.1f} GB total, "
+          f"{hw['ram_available_gb']:.1f} GB available")
+    print(f"  Tier:       {hw['tier']}")
+    print(f"  CUDA:       {hw.get('cuda') or 'N/A'}")
 
-    @staticmethod
-    def estimate_tokens(texts: list[str], model_name: str) -> dict:
-        try:
-            from transformers import AutoTokenizer
-            tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-            lengths = [len(tokenizer.encode(t)) for t in texts]
-            return {
-                "min": min(lengths), "max": max(lengths), "mean": sum(lengths) / len(lengths),
-                "total": sum(lengths), "count": len(lengths),
-            }
-        except Exception:
-            return {"error": "Could not estimate"}
+    best = summary["recommended_model"]
+    print(f"\n=== Recommended Model ===")
+    print(f"  Model:  {best['name']}")
+    print(f"  Params: {best['params_b']:.1f}B")
+    print(f"  Method: {best['method'].upper()}")
+    print(f"  Fits:   {best['fits']}")
+    print(f"  Why:    {best['explanation']}")
 
-
-# ==================================================================== #
-#  30 — CacheManager
-# ==================================================================== #
-
-class CacheManager:
-    """Reuse downloaded models across sessions via symlinks or Drive cache."""
-
-    def __init__(self, cache_dir: Optional[str] = None):
-        self.cache_dir = cache_dir or os.path.expanduser(
-            settings.hf_cache_dir or "~/.cache/huggingface"
-        )
-
-    def get_cached_path(self, model_name: str) -> Optional[str]:
-        sanitized = model_name.replace("/", "--")
-        snapshot_dir = os.path.join(self.cache_dir, "hub", f"models--{sanitized}")
-        if os.path.isdir(snapshot_dir):
-            refs = os.path.join(snapshot_dir, "refs")
-            if os.path.isdir(refs):
-                for fname in os.listdir(refs):
-                    blob = os.path.join(snapshot_dir, "snapshots", fname)
-                    if os.path.isdir(blob):
-                        return blob
-        return None
-
-    def is_cached(self, model_name: str) -> bool:
-        return self.get_cached_path(model_name) is not None
-
-    def cache_size(self) -> str:
-        total = 0
-        hub_dir = os.path.join(self.cache_dir, "hub")
-        if os.path.isdir(hub_dir):
-            for root, dirs, files in os.walk(hub_dir):
-                total += sum(os.path.getsize(os.path.join(root, f)) for f in files)
-        return f"{total / 1e9:.2f} GB"
-
-    def clear_cache(self):
-        import shutil
-        hub_dir = os.path.join(self.cache_dir, "hub")
-        if os.path.isdir(hub_dir):
-            shutil.rmtree(hub_dir)
-            os.makedirs(hub_dir)
-
-
-# ==================================================================== #
-#  31 — HFHubPusher
-# ==================================================================== #
-
-class HFHubPusher:
-    """Push models to HuggingFace Hub with authentication and version tagging."""
-
-    def __init__(self, token: Optional[str] = None):
-        self.token = token or settings.hf_token
-
-    def push_code(self, local_path: str, repo_id: str,
-                  commit_message: str = "Fine-tuned model",
-                  create_pr: bool = False) -> str:
-        pr_block = '\n    create_pr=True,' if create_pr else ''
-        return f"""
-from huggingface_hub import HfApi, login
-login(token="{self.token or 'YOUR_TOKEN'}")
-api = HfApi()
-api.create_repo(repo_id="{repo_id}", exist_ok=True)
-api.upload_folder(
-    folder_path="{local_path}",
-    repo_id="{repo_id}",
-    commit_message="{commit_message}",{pr_block}
-)
-print(f"Pushed: https://huggingface.co/{{repo_id}}")
-
-# Tag version
-try:
-    api.create_tag(repo_id="{repo_id}", tag="v1.0", message="Fine-tuned version")
-except Exception:
-    pass
-"""
-
-    @staticmethod
-    def generate_model_card(model_name: str, dataset: str,
-                            method: str, metrics: dict = None) -> str:
-        return ModelCardGenerator.generate(model_name, dataset, method, metrics)
-
-
-# ==================================================================== #
-#  32 — ModelCardGenerator
-# ==================================================================== #
-
-class ModelCardGenerator:
-    """Auto-create README.md for pushed models."""
-
-    @staticmethod
-    def generate(base_model: str, dataset: str, method: str,
-                 metrics: dict = None, description: str = "") -> str:
-        metrics_str = "\n".join(
-            f"  - {k}: {v}" for k, v in (metrics or {}).items()
-        ) or "  - Loss: TBD"
-
-        return f"""---
-license: mit
-base_model: {base_model}
-tags:
-  - colab-agent
-  - fine-tuned
-  - {method}
-datasets:
-  - {dataset}
----
-
-# Fine-Tuned Model
-
-**Base model:** {base_model}
-**Fine-tuning method:** {method.upper()}
-**Dataset:** {dataset}
-**Fine-tuned with:** Colab Agent
-
-## Description
-{description or f"Model fine-tuned from {base_model} on {dataset} using {method.upper()}."}
-
-## Metrics
-{metrics_str}
-
-## Usage
-```python
-from transformers import AutoTokenizer, AutoModelForCausalLM
-tokenizer = AutoTokenizer.from_pretrained("YOUR_REPO_ID")
-model = AutoModelForCausalLM.from_pretrained("YOUR_REPO_ID")
-```
-
-## Training Details
-- Framework: HuggingFace Transformers + PEFT
-- Platform: Google Colab
-- Generation: Colab Agent
-"""
-
-
-# ==================================================================== #
-#  33 — AdapterMerger
-# ==================================================================== #
-
-class AdapterMerger:
-    """Merge LoRA/QLoRA adapters into the base model."""
-
-    @staticmethod
-    def merge_code(peft_model_path: str, output_path: str,
-                   base_model_name: Optional[str] = None) -> str:
-        return f"""
-import torch
-from peft import PeftModel
-from transformers import AutoTokenizer, AutoModelForCausalLM
-
-base = "{base_model_name or 'BASE_MODEL'}"
-print(f"Loading base model: {{base}}")
-model = AutoModelForCausalLM.from_pretrained(base, torch_dtype=torch.float16, device_map="auto")
-tokenizer = AutoTokenizer.from_pretrained(base)
-
-print(f"Loading adapter from: {peft_model_path}")
-model = PeftModel.from_pretrained(model, "{peft_model_path}")
-
-print("Merging adapter into base model...")
-model = model.merge_and_unload()
-print(f"Merge complete! Saving to: {output_path}")
-
-model.save_pretrained("{output_path}")
-tokenizer.save_pretrained("{output_path}")
-print(f"Full model saved to {{output_path}}")
-print(f"Size on disk will be ~{{sum(f.stat().st_size for f in __import__('pathlib').Path('{output_path}').rglob('*')) / 1e9:.2f}} GB")
-"""
-
-
-# ==================================================================== #
-#  34 — QuantizationSelector
-# ==================================================================== #
-
-class QuantizationSelector:
-    """Auto-select 4-bit, 8-bit, or none based on runtime."""
-
-    @staticmethod
-    def select(vram_gb: float, model_params_b: float) -> str:
-        if vram_gb < 8:
-            return "4bit"
-        if model_params_b > 7 and vram_gb < 24:
-            return "4bit"
-        if model_params_b > 3 and vram_gb < 16:
-            return "4bit"
-        if model_params_b > 7 and vram_gb < 40:
-            return "8bit"
-        if vram_gb < 8:
-            return "4bit"
-        return "none"
-
-    @staticmethod
-    def config_code(vram_gb: float, model_params_b: float) -> str:
-        quant = QuantizationSelector.select(vram_gb, model_params_b)
-        if quant == "4bit":
-            return """
-from transformers import BitsAndBytesConfig
-quant_config = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_quant_type="nf4",
-    bnb_4bit_compute_dtype=torch.float16,
-    bnb_4bit_use_double_quant=True,
-)
-"""
-        elif quant == "8bit":
-            return """
-from transformers import BitsAndBytesConfig
-quant_config = BitsAndBytesConfig(load_in_8bit=True)
-"""
-        return "quant_config = None"
-
-
-# ==================================================================== #
-#  35 — ModelDownloadProgressBar
-# ==================================================================== #
-
-class ModelDownloadProgressBar:
-    """Show download progress with ETA using tqdm."""
-
-    @staticmethod
-    def wrapping_code() -> str:
-        return """
-from huggingface_hub import snapshot_download
-from tqdm.auto import tqdm
-import os
-
-class DownloadProgress:
-    def __init__(self, desc="Downloading"):
-        self.pbar = None
-        self.desc = desc
-    def __call__(self, current, total, *args):
-        if self.pbar is None:
-            self.pbar = tqdm(total=total, desc=self.desc, unit="B", unit_scale=True)
-        self.pbar.update(current - self.pbar.n)
-        if current >= total:
-            self.pbar.close()
-
-# Usage:
-# path = snapshot_download("microsoft/phi-2", progress_callback=DownloadProgress())
-# print(f"Downloaded to: {path}")
-"""
+    all_f = summary["all_fitting"]
+    fitting = [m for m in all_f if m["fits"]]
+    if fitting:
+        print(f"\n=== All {len(fitting)} Models That Fit ===")
+        for m in fitting:
+            print(f"  - {m['name']} ({m['params_b']:.1f}B, "
+                  f"needs {m['vram_needed']:.0f}GB VRAM)")

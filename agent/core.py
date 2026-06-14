@@ -44,9 +44,14 @@ from storage.models_store import ModelVersionStore
 from storage.metrics_store import MetricsStore
 from colab.executor import ColabRunner
 from colab.runtime import RuntimeManager
+from colab.drive_sync import DriveSyncDaemon
+from colab.resumer import ColabResumer
+from colab.bridge import ColabBridge
+from colab.enterprise import ColabEnterprise
 from models.huggingface import HuggingFaceManager
 from models.finetune import FinetuneCodeGenerator
 from models.finetune_orchestrator import FineTuneOrchestrator
+from models.selector import ModelSelector, detect_hardware, print_model_summary
 from gh_integration.integration import GitHubIntegration
 from storage.migration import migrate
 from gh_integration.logger import GitHubLogger
@@ -198,6 +203,12 @@ class OrchestratorAgent:
         self.github = GitHubIntegration()
         self.github_logger = GitHubLogger()
 
+        # Colab integration modules
+        self.drive_sync: Optional[DriveSyncDaemon] = None
+        self.resumer = ColabResumer()
+        self.bridge = ColabBridge()
+        self.enterprise = ColabEnterprise()
+
         # Safety / Cost
         self.cost_tracker = CostTracker()
         self.budget = BudgetManager(
@@ -317,6 +328,23 @@ class OrchestratorAgent:
         self.metrics.gauge("plan.steps", len(plan.steps))
         self.metrics.counter("jobs.started")
 
+        # Start Drive sync in background
+        self.drive_sync = DriveSyncDaemon(
+            job_id=self.current_job_id,
+            local_dir="./checkpoints",
+        )
+        self.drive_sync.start(interval=120)
+        self._log("DriveSyncDaemon started")
+
+        # Check for previous run to resume
+        prev = self.resumer.detect_previous_run(self.current_job_id)
+        if prev.get("has_checkpoint"):
+            self._log(f"Previous checkpoint found (v{prev.get('checkpoint_version')}). Will auto-resume.")
+
+        # Start WebSocket bridge
+        self.bridge.start(job_id=self.current_job_id)
+        self._log("ColabBridge started")
+
         # Phase 2: Execute steps
         print("[AGENT] Starting execution...")
         while self.tracker.current_step_index < len(plan.steps):
@@ -375,6 +403,12 @@ class OrchestratorAgent:
         final = {"status": final_status, "summary": summary, "job_id": self.current_job_id}
         final, _ = self.hook_runner.run_on_complete(final, self._ws_context)
 
+        # Stop background services
+        if self.drive_sync:
+            self.drive_sync.stop()
+        self.bridge.stop()
+        self._log("Background services stopped")
+
         # Push final report to GitHub
         if self.github_logger.token:
             conv_msgs = self.convs.get_messages(self.conversation_id)
@@ -406,9 +440,45 @@ class OrchestratorAgent:
     # ---------------------------------------------------------------- #
 
     def _generate_plan(self, goal: str, model: str = None, dataset: str = None, method: str = None) -> Optional[Plan]:
-        model_hint = f"Model: {model}\n" if model else ""
+        model_hint = ""
         dataset_hint = f"Dataset: {dataset}\n" if dataset else ""
         method_hint = f"Fine-tuning method: {method}\n" if method else ""
+
+        if model:
+            model_hint = f"Model: {model}\n"
+        else:
+            # Auto-select model based on hardware
+            selector = ModelSelector()
+            hw = selector.detect()
+            best = selector.best_fit(
+                method=method or "qlora",
+                exclude_auth=(not os.environ.get("HF_TOKEN")),
+            )
+            if best.get("fits"):
+                model_hint = (
+                    f"Hardware detected: {hw.get('gpu_name', 'CPU')} "
+                    f"with {hw.get('vram_total_gb', 0):.0f}GB VRAM, "
+                    f"{hw.get('ram_total_gb', 0):.0f}GB RAM.\n"
+                    f"Recommended model: {best['name']} "
+                    f"({best['params_b']:.1f}B params, "
+                    f"method: {best['method'].upper()}).\n"
+                )
+                if not method:
+                    method_hint = f"Fine-tuning method: {best['method']}\n"
+                model_hint += f"Model: {best['name']}\n"
+                self._log(f"Auto-selected model: {best['name']} ({best['explanation']})")
+                print(f"[AGENT] Hardware: {hw.get('gpu_name', 'CPU')} "
+                      f"({hw.get('vram_total_gb', 0):.0f}GB VRAM)")
+                print(f"[AGENT] Selected model: {best['name']} "
+                      f"({best['params_b']:.1f}B, {best['method'].upper()})")
+            else:
+                model_hint = (
+                    f"Warning: {best['explanation']}\n"
+                    f"Using CPU-compatible mode.\n"
+                    f"Model: {best['name']}\n"
+                )
+                print(f"[AGENT] WARNING: {best['explanation']}")
+
         prompt = PLANNING_PROMPT.format(goal=goal, model_hint=model_hint, dataset_hint=dataset_hint, method_hint=method_hint)
         plan_data = self.llm.safe_json_chat(
             [{"role": "system", "content": SYSTEM_PROMPT},
@@ -581,6 +651,28 @@ class OrchestratorAgent:
                     if step.status == StepStatus.SUCCESS:
                         self.retry_policy.record_result(True)
                         print(f"[AGENT] Step {step.id} OK ({step.execution_time:.1f}s)")
+
+                        # Bridge events on success
+                        self.bridge.record_status(f"step_{step.id}_ok", step.description)
+                        if step.metrics:
+                            for k, v in step.metrics.items():
+                                self.bridge.record_metric(f"step_{step.id}_{k}", v)
+
+                        # Sync checkpoints after training steps
+                        if step.action in ("train", "apply_peft") and self.drive_sync:
+                            self.drive_sync.sync_now()
+                            state = step.metrics or {}
+                            state["epochs_completed"] = state.get("epoch", 0)
+                            self.resumer.save_state(self.current_job_id, {
+                                "model_name": self.plan.analysis.get("model", {}).get("name"),
+                                "dataset_name": self.plan.analysis.get("dataset", {}).get("name"),
+                                "method": self.plan.analysis.get("method", {}).get("type"),
+                                "epochs_completed": state.get("epochs_completed"),
+                                "last_loss": step.metrics.get("final_loss"),
+                                "step_id": step.id,
+                            })
+                            self._log("Checkpoint synced to Drive and state saved")
+
                         return {"step_id": step.id, "status": "success",
                                 "metrics": step.metrics}
 
@@ -1009,6 +1101,18 @@ print(dataset[0])
         self.metrics.gauge("plan.steps", len(plan.steps))
         self.metrics.counter("jobs.started")
 
+        # Start background services (async)
+        self.drive_sync = DriveSyncDaemon(
+            job_id=self.current_job_id,
+            local_dir="./checkpoints",
+        )
+        self.drive_sync.start(interval=120)
+        prev = self.resumer.detect_previous_run(self.current_job_id)
+        if prev.get("has_checkpoint"):
+            self._log(f"Previous checkpoint found (v{prev.get('checkpoint_version')}). Will auto-resume.")
+        self.bridge.start(job_id=self.current_job_id)
+        self._log("Background services started")
+
         print("[AGENT] Starting execution...")
         while self.tracker.current_step_index < len(plan.steps):
             if self._elapsed_hours() > MAX_COLAB_HOURS:
@@ -1062,6 +1166,12 @@ print(dataset[0])
         summary, _ = self.hook_runner.run_on_summary(summary, self._ws_context)
         final = {"status": final_status, "summary": summary, "job_id": self.current_job_id}
         final, _ = self.hook_runner.run_on_complete(final, self._ws_context)
+
+        # Stop background services
+        if self.drive_sync:
+            self.drive_sync.stop()
+        self.bridge.stop()
+        self._log("Background services stopped")
 
         if self.github_logger.token:
             conv_msgs = await asyncio.to_thread(self.convs.get_messages, self.conversation_id)
