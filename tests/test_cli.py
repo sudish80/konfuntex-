@@ -21,7 +21,7 @@ class TestCLICommands:
             from unittest.mock import patch as p
             with p("cli.console.print"):
                 cmd_run("test goal")
-            mock_agent.assert_called_once_with("test goal", model=None, dataset=None, method=None)
+            mock_agent.assert_called_once_with("test goal", model=None, dataset=None, method=None, executor="auto")
 
     def test_cmd_list_jobs_empty(self, monkeypatch):
         from cli import cmd_list_jobs
@@ -165,7 +165,7 @@ class TestCLICommands:
         with patch.object(sys, "argv", ["cli.py", "run", "test goal"]):
             with patch("cli.cmd_run") as mock:
                 main()
-                mock.assert_called_once_with("test goal", model=None, dataset=None, method=None)
+                mock.assert_called_once_with("test goal", model=None, dataset=None, method=None, executor="auto")
 
     def test_main_interactive(self, monkeypatch):
         from cli import main

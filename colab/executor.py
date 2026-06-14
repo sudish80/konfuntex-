@@ -91,13 +91,22 @@ class ColabRunner:
       - Locally (simulation): for testing without a real Colab environment
     """
 
-    def __init__(self, drive_folder_id: Optional[str] = None):
+    def __init__(self, drive_folder_id: Optional[str] = None, executor: str = "auto"):
         self.drive_folder_id = drive_folder_id
         self.session = None
         self.active_notebook_id = None
         self.active_notebook_url = None
         self.execution_history = []
-        self.simulate = os.environ.get("COLAB_AGENT_SIMULATE", "True").lower() == "true"
+        
+        # Determine execution mode
+        if executor == "auto":
+            self.simulate = os.environ.get("COLAB_AGENT_SIMULATE", "True").lower() == "true"
+        elif executor == "local":
+            self.simulate = False  # Use local persistent kernel
+        elif executor == "colab":
+            self.simulate = True  # Use Colab remote execution
+        else:
+            self.simulate = os.environ.get("COLAB_AGENT_SIMULATE", "True").lower() == "true"
         self._local_kernel = None # Persistent kernel for local mode
 
     def _get_local_kernel(self):

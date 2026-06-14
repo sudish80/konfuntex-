@@ -129,7 +129,7 @@ def cmd_init():
     _ok(f"database initialised at [white]{settings.data_dir}[/white]")
 
 
-def cmd_run(goal: str, model: str = None, dataset: str = None, method: str = None):
+def cmd_run(goal: str, model: str = None, dataset: str = None, method: str = None, executor: str = "auto"):
     _sep()
     console.print(f"\n  [{ACCENT}]❯[/{ACCENT}]  [white bold]{escape(goal)}[/white bold]\n")
 
@@ -140,6 +140,8 @@ def cmd_run(goal: str, model: str = None, dataset: str = None, method: str = Non
         overrides.append(f"dataset=[{INFO}]{dataset}[/{INFO}]")
     if method:
         overrides.append(f"method=[{INFO}]{method}[/{INFO}]")
+    if executor != "auto":
+        overrides.append(f"executor=[{INFO}]{executor}[/{INFO}]")
     if overrides:
         console.print(f"  [{MUTED}]" + "  ".join(overrides) + f"[/{MUTED}]\n")
 
@@ -150,7 +152,7 @@ def cmd_run(goal: str, model: str = None, dataset: str = None, method: str = Non
     ]
     with Progress(*spinner_cols, console=console, transient=True) as prog:
         task = prog.add_task("planning…", total=None)
-        result = run_agent(goal, model=model, dataset=dataset, method=method)
+        result = run_agent(goal, model=model, dataset=dataset, method=method, executor=executor)
         prog.update(task, description="done")
 
     _sep()
@@ -708,6 +710,8 @@ def main():
     parser.add_argument("--model", help="base model id")
     parser.add_argument("--dataset", help="dataset id")
     parser.add_argument("--method", choices=["lora", "qlora", "full"])
+    parser.add_argument("--executor", choices=["local", "colab", "auto"], default="auto",
+                        help="Execution environment: local (persistent kernel), colab (remote), auto (detect)")
 
     args = parser.parse_args()
     cmd = args.command
@@ -717,7 +721,7 @@ def main():
         "init":         lambda: cmd_init(),
         "run":          lambda: cmd_run(
                             " ".join(extra) if extra else Prompt.ask(f"[{ACCENT}]goal[/{ACCENT}]"),
-                            model=args.model, dataset=args.dataset, method=args.method),
+                            model=args.model, dataset=args.dataset, method=args.method, executor=args.executor),
         "interactive":  lambda: cmd_interactive(),
         "jobs":         lambda: cmd_list_jobs(),
         "job":          lambda: cmd_show_job(extra[0]) if extra else _fail("need job id"),

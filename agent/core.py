@@ -166,9 +166,9 @@ class OrchestratorAgent:
       - Code sanitization
     """
 
-    def __init__(self, verbose: bool = None, model: str = None, dataset: str = None, method: str = None):
+    def __init__(self, verbose: bool = None, model: str = None, dataset: str = None, method: str = None, executor: str = "auto"):
         self.llm = LLMClient()
-        self.runner = ColabRunner()
+        self.runner = ColabRunner(executor=executor)
         self.verbose = settings.agent_verbose if verbose is None else verbose
         self.conversation_id = None
         self.current_job_id = None
@@ -180,6 +180,7 @@ class OrchestratorAgent:
         self._override_model = model
         self._override_dataset = dataset
         self._override_method = method
+        self._executor = executor  # "local", "colab", "auto"
 
         # Storage
         self.jobs = JobStore()
@@ -1240,17 +1241,17 @@ print(dataset[0])
 _current_agent: Optional[OrchestratorAgent] = None
 
 
-def run_agent(goal: str, verbose: bool = True, model: str = None, dataset: str = None, method: str = None) -> dict:
+def run_agent(goal: str, verbose: bool = True, model: str = None, dataset: str = None, method: str = None, executor: str = "auto") -> dict:
     global _current_agent
-    agent = OrchestratorAgent(verbose=verbose, model=model, dataset=dataset, method=method)
+    agent = OrchestratorAgent(verbose=verbose, model=model, dataset=dataset, method=method, executor=executor)
     _current_agent = agent
     return agent.run(goal)
 
 
-async def async_run_agent(goal: str, verbose: bool = True, model: str = None, dataset: str = None, method: str = None) -> dict:
+async def async_run_agent(goal: str, verbose: bool = True, model: str = None, dataset: str = None, method: str = None, executor: str = "auto") -> dict:
     """Async entry point. Creates agent and returns result from async_run()."""
     global _current_agent
-    agent = OrchestratorAgent(verbose=verbose, model=model, dataset=dataset, method=method)
+    agent = OrchestratorAgent(verbose=verbose, model=model, dataset=dataset, method=method, executor=executor)
     _current_agent = agent
     return await agent.async_run(goal)
 
