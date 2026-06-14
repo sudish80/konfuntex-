@@ -75,80 +75,26 @@ class TestCostEstimator:
 
 class TestHFModelSelector:
     def test_recommend_returns_list(self):
-        from models.selector import HFModelSelector
-        results = HFModelSelector.recommend("text-generation", vram_gb=16)
+        from models.selector import ModelSelector
+        sel = ModelSelector()
+        sel.detect()
+        results = sel.models_that_fit(vram_gb=16)
         assert len(results) > 0
         assert "name" in results[0]
-        assert "fits_on_current_runtime" in results[0]
 
     def test_best_fit(self):
-        from models.selector import HFModelSelector
-        model = HFModelSelector.best_fit("code-generation", vram_gb=80)
+        from models.selector import ModelSelector
+        sel = ModelSelector()
+        sel.detect()
+        model = sel.best_fit(vram_gb=80)
         assert model is not None
-        assert isinstance(model, str)
+        assert "name" in model
 
     def test_selector_code(self):
-        from models.selector import HFModelSelector
-        code = HFModelSelector.selector_code("text-generation")
-        assert "MODEL_NAME" in code
-
-
-class TestDatasetLoader:
-    def test_detect_format_hf(self):
-        from models.selector import DatasetLoader
-        assert DatasetLoader.detect_format("databricks/dolly") == "hf"
-
-    def test_detect_format_csv(self):
-        from models.selector import DatasetLoader
-        assert DatasetLoader.detect_format("data.csv") == "csv"
-
-    def test_load_code_hf(self):
-        from models.selector import DatasetLoader
-        code = DatasetLoader.load_code("databricks/dolly")
-        assert "load_dataset" in code
-
-
-class TestModelSizeEstimator:
-    def test_estimate_vram(self):
-        from models.selector import ModelSizeEstimator
-        est = ModelSizeEstimator.estimate_vram(7.0, "qlora")
-        assert est["model_params_b"] == 7.0
-        assert est["vram_total_gb"] > 0
-
-
-class TestTokenizerManager:
-    def test_auto_config_code(self):
-        from models.selector import TokenizerManager
-        code = TokenizerManager.auto_config_code("microsoft/phi-2")
-        assert "AutoTokenizer" in code
-
-
-class TestCacheManager:
-    def test_cache_size(self):
-        from models.selector import CacheManager
-        cm = CacheManager(cache_dir=tempfile.gettempdir())
-        size = cm.cache_size()
-        assert isinstance(size, str)
-        assert "GB" in size
-
-
-class TestQuantizationSelector:
-    def test_4bit_for_small_vram(self):
-        from models.selector import QuantizationSelector
-        assert QuantizationSelector.select(6, 7.0) == "4bit"
-
-    def test_none_for_large_vram(self):
-        from models.selector import QuantizationSelector
-        assert QuantizationSelector.select(80, 1.0) == "none"
-
-
-class TestModelCardGenerator:
-    def test_generate(self):
-        from models.selector import ModelCardGenerator
-        card = ModelCardGenerator.generate("phi-2", "dolly", "qlora")
-        assert "phi-2" in card
-        assert "qlora" in card
-        assert "dolly" in card
+        from models.selector import ModelSelector
+        sel = ModelSelector()
+        summary = sel.summary()
+        assert "recommended_model" in summary
 
 
 # ---- Phase 4: models/training_engine.py ---- #

@@ -531,7 +531,7 @@ class OrchestratorAgent:
 
         print(f"[AGENT] Step {step.id}/{len(self.tracker.steps)}: {step.description}")
 
-        while self.retry_policy.should_retry():
+        while self.retry_policy.should_retry() and step.can_retry():
             if self.tracker.total_retries >= MAX_TOTAL_ERROR_RETRIES:
                 step.error = f"Exceeded max total retries ({MAX_TOTAL_ERROR_RETRIES})"
                 step.status = StepStatus.FAILED
@@ -1229,7 +1229,7 @@ print(dataset[0])
         self._log(f"Step {step.id}: {step.description}")
         print(f"[AGENT] Step {step.id}/{len(self.tracker.steps)}: {step.description}")
 
-        while self.retry_policy.should_retry():
+        while self.retry_policy.should_retry() and step.can_retry():
             if self.tracker.total_retries >= MAX_TOTAL_ERROR_RETRIES:
                 step.error = f"Exceeded max total retries ({MAX_TOTAL_ERROR_RETRIES})"
                 step.status = StepStatus.FAILED
