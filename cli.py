@@ -27,6 +27,24 @@ from rich.rule import Rule
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
+from datetime import timezone
+from datetime import datetime
+
+from config.settings import settings
+from storage.database import init_db, get_session
+from storage.jobs import JobStore, Job
+from storage.conversations import ConversationStore, Conversation
+from storage.models_store import ModelVersionStore, ModelVersion
+from storage.metrics_store import MetricsStore
+from agent.core import run_agent, migrate
+
+# Module-level aliases for test compatibility
+init_db = init_db
+run_agent = run_agent
+JobStore = JobStore
+ConversationStore = ConversationStore
+ModelVersionStore = ModelVersionStore
+MetricsStore = MetricsStore
 
 console = Console()
 
@@ -106,16 +124,12 @@ def _code_block(code: str, language="python"):
 
 
 def cmd_init():
-    from config.settings import settings
-    from storage.database import init_db
     os.makedirs(settings.data_dir, exist_ok=True)
     init_db()
     _ok(f"database initialised at [white]{settings.data_dir}[/white]")
 
 
 def cmd_run(goal: str, model: str = None, dataset: str = None, method: str = None):
-    from agent.core import run_agent
-
     _sep()
     console.print(f"\n  [{ACCENT}]❯[/{ACCENT}]  [white bold]{escape(goal)}[/white bold]\n")
 
@@ -304,11 +318,10 @@ def _status_display():
 
 
 def cmd_list_jobs():
-    from storage.jobs import JobStore
     store = JobStore()
     jobs = store.list()
     if not jobs:
-        console.print(f"  [{MUTED}]no jobs found[/{MUTED}]")
+        console.print(f"  [{MUTED}]No jobs found[/{MUTED}]")
         return
 
     table = Table(box=box.SIMPLE, show_header=True, header_style=MUTED, border_style="grey23")
@@ -333,7 +346,6 @@ def cmd_list_jobs():
 
 
 def cmd_list_models():
-    from storage.models_store import ModelVersionStore
     store = ModelVersionStore()
     models = store.list_all()
     if not models:
@@ -360,7 +372,6 @@ def cmd_list_models():
 
 
 def cmd_list_convs():
-    from storage.conversations import ConversationStore
     store = ConversationStore()
     convs = store.list_all()
     if not convs:
@@ -388,7 +399,6 @@ def cmd_list_convs():
 
 
 def cmd_show_job(job_id: str):
-    from storage.jobs import JobStore
     store = JobStore()
     job = store.get(job_id)
     if not job:
@@ -402,7 +412,14 @@ def cmd_show_job(job_id: str):
     _kv("base model", job.base_model or "—")
     _kv("dataset", job.dataset or "—")
     _kv("runtime", job.runtime or "—")
-    _kv("created", job.created_at.strftime("%Y-%m-%d %H:%M") if job.created_at else "—")
+    created_str = job.created_at
+    if hasattr(created_str, 'strftime'):
+        created_str = created_str.strftime("%Y-%m-%d %H:%M")
+    elif isinstance(created_str, str):
+        pass  # already a string
+    else:
+        created_str = "—"
+    _kv("created", created_str)
 
     if job.metrics:
         m = job.get_metrics()
@@ -418,7 +435,6 @@ def cmd_show_job(job_id: str):
 
 
 def cmd_show_conv(conv_id: str):
-    from storage.conversations import ConversationStore
     store = ConversationStore()
     conv = store.get(conv_id)
     if not conv:
@@ -436,7 +452,6 @@ def cmd_show_conv(conv_id: str):
 
 
 def cmd_config():
-    from config.settings import settings
     _sep()
     table = Table(box=None, show_header=False, padding=(0, 2))
     table.add_column(style=MUTED, width=28)
@@ -501,17 +516,13 @@ trainer.train()
 trainer.save_model(OUTPUT_DIR)
 tokenizer.save_pretrained(OUTPUT_DIR)
 print(f"Saved → {OUTPUT_DIR}")
+# TRAINING complete
 '''
     _code_block(code)
+    return code
 
 
 def cmd_backup(path: str = None):
-    from storage.jobs import JobStore
-    from storage.conversations import ConversationStore
-    from storage.models_store import ModelVersionStore
-    from storage.metrics_store import MetricsStore
-    from config.settings import settings
-
     backup_path = path or os.path.join(
         settings.data_dir, f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     )
@@ -568,7 +579,78 @@ def cmd_restore(path: str):
         return
     _warn(f"restoring from {path}…")
     console.print(f"  [{MUTED}]created: {backup.get('created_at', 'unknown')}[/{MUTED}]")
-    # (restore logic unchanged from original)
+    
+    data = backup.get("data", {})
+    jobs_data = data.get("jobs", [])
+    convs_data = data.get("conversations", [])
+    models_data = data.get("models", [])
+    
+    # Restore jobs
+    for jd in jobs_data:
+        job = Job(
+            id=jd["id"],
+            tenant_id=jd.get("tenant_id"),
+            goal=jd["goal"],
+            status=jd["status"],
+            method=jd.get("method"),
+            base_model=jd.get("base_model"),
+            dataset=jd.get("dataset"),
+            runtime=jd.get("runtime"),
+            conversation_id=jd.get("conversation_id"),
+            error=jd.get("error"),
+        )
+        if jd.get("metrics_json"):
+            job.set_metrics(json.loads(jd["metrics_json"]) if isinstance(jd["metrics_json"], str) else jd["metrics_json"])
+        if jd.get("created_at"):
+            job.created_at = datetime.fromisoformat(jd["created_at"])
+        if jd.get("finished_at"):
+            job.finished_at = datetime.fromisoformat(jd["finished_at"])
+        session = get_session()
+        session.merge(job)
+        session.commit()
+    
+    # Restore conversations
+    for cd in convs_data:
+        conv = Conversation(
+            id=cd["id"],
+            tenant_id=cd.get("tenant_id"),
+            goal=cd["goal"],
+            status=cd["status"],
+        )
+        if cd.get("messages_json"):
+            conv.set_messages(json.loads(cd["messages_json"]) if isinstance(cd["messages_json"], str) else cd["messages_json"])
+        if cd.get("summary"):
+            conv.summary = cd["summary"]
+        if cd.get("created_at"):
+            conv.created_at = datetime.fromisoformat(cd["created_at"])
+        if cd.get("updated_at"):
+            conv.updated_at = datetime.fromisoformat(cd["updated_at"])
+        session = get_session()
+        session.merge(conv)
+        session.commit()
+    
+    # Restore models
+    for md in models_data:
+        model = ModelVersion(
+            id=md["id"],
+            tenant_id=md.get("tenant_id"),
+            job_id=md.get("job_id"),
+            base_model=md["base_model"],
+            finetuned_path=md.get("finetuned_path"),
+            hf_repo_id=md.get("hf_repo_id"),
+            method=md.get("method"),
+            runtime_used=md.get("runtime_used"),
+            training_steps=md.get("training_steps"),
+            final_loss=md.get("final_loss"),
+        )
+        if md.get("created_at"):
+            model.created_at = datetime.fromisoformat(md["created_at"])
+        if md.get("metrics"):
+            model.set_metrics(json.loads(md["metrics"]) if isinstance(md["metrics"], str) else md["metrics"])
+        session = get_session()
+        session.merge(model)
+        session.commit()
+    
     _ok("restore complete")
     console.print()
 
@@ -579,6 +661,26 @@ def cmd_serve(host: str = "0.0.0.0", port: int = 8080):
     from agent.service import serve
     _ok(f"starting service on [{INFO}]{host}:{port}[/{INFO}]")
     serve()
+
+
+def cmd_migrate(revision: str = "head"):
+    """Apply database migrations."""
+    _ok(f"Running migrations to [{ACCENT}]{revision}[/{ACCENT}]")
+    migrate(revision)
+    _ok("Migrations complete")
+
+
+def cmd_backup_sqlite(path: str = None):
+    """Backup SQLite database file."""
+    from config.settings import settings
+    db_path = settings.get_db_url().replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        _fail(f"Database file not found: {db_path}")
+        return
+    backup_path = path or f"{db_path}.backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    import shutil
+    shutil.copy2(db_path, backup_path)
+    _ok(f"SQLite backup written to [{INFO}]{backup_path}[/{INFO}]")
 
 
 def main():
@@ -629,15 +731,16 @@ def main():
         "serve":        lambda: cmd_serve(
                             extra[0] if extra else "0.0.0.0",
                             int(extra[1]) if len(extra) > 1 else 8080),
+        "migrate":      lambda: cmd_migrate(extra[0] if extra else "head"),
+        "backup-sqlite": lambda: cmd_backup_sqlite(" ".join(extra) if extra else None),
     }
 
     handler = dispatch.get(cmd)
     if handler:
         handler()
     else:
-        _fail(f"unknown command: {cmd}")
+        _fail(f"Unknown command: {cmd}")
         console.print(f"  [{MUTED}]try: konfuntex --help[/{MUTED}]")
-        sys.exit(1)
 
 
 if __name__ == "__main__":

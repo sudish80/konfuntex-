@@ -79,3 +79,12 @@ def migrate_sqlite_to_postgres(sqlite_path: str, pg_url: str) -> None:
             raise RuntimeError(f"Migration failed on table {table}") from exc
 
     logger.info("Migration complete")
+
+
+def migrate(revision: str = "head") -> None:
+    """Run alembic migrations to the specified revision."""
+    from alembic.config import Config
+    from alembic import command
+    
+    alembic_cfg = Config("alembic.ini")
+    command.upgrade(alembic_cfg, revision)

@@ -138,22 +138,23 @@ class PluginRegistry:
 
     def get_all(self) -> list[Plugin]:
         with self._lock:
-            graph = {name: set(meta.dependencies) for name, meta in self._plugins.items() if meta.enabled}
+            enabled_plugins = {name: meta for name, meta in self._plugins.items() if meta.enabled}
+            graph = {name: set(meta.dependencies) for name, meta in enabled_plugins.items()}
             ts = graphlib.TopologicalSorter(graph)
             order = list(ts.static_order())
             
-            # Sort by priority within the topological order for stability
-            # This is complex: topological order + priority.
-            # Simplified: just return in topological order.
-            
+            # Build result with (priority, plugin) tuples for sorting
             result = []
             for name in order:
-                meta = self._plugins.get(name)
-                if meta and meta.enabled:
+                meta = enabled_plugins.get(name)
+                if meta:
                     if meta.instance is None:
                         meta.instance = meta.cls()
-                    result.append(meta.instance)
-            return result
+                    result.append((meta.priority, meta.instance))
+            
+            # Sort by priority (lower = higher priority)
+            result.sort(key=lambda x: x[0])
+            return [p for _, p in result]
 
     def list_registered(self) -> list[dict]:
         with self._lock:

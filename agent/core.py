@@ -48,6 +48,7 @@ from models.huggingface import HuggingFaceManager
 from models.finetune import FinetuneCodeGenerator
 from models.finetune_orchestrator import FineTuneOrchestrator
 from gh_integration.integration import GitHubIntegration
+from storage.migration import migrate
 from gh_integration.logger import GitHubLogger
 from config.settings import settings
 
@@ -618,8 +619,17 @@ class OrchestratorAgent:
             ret_status = "skipped"
         return {"step_id": step.id, "status": ret_status, "error": step.error}
 
-    def _handle_analysis(self, step: PlanStep, analysis: dict):
-        action = analysis.get("next_action", "proceed")
+    def rewrite_plan(self, step: PlanStep, reason: str):
+        """Re-generate plan based on execution feedback."""
+        self._log(f"Rewriting plan due to: {reason}")
+        new_plan = self._generate_plan(self.user_goal, self._override_model, self._override_dataset, self._override_method)
+        if new_plan:
+            self.plan = new_plan
+            self.tracker.steps = new_plan.steps
+            self.tracker.current_step_index = step.id # Try to restart from here
+            self._log("Plan rewritten successfully.")
+        else:
+            self._log("Failed to rewrite plan.")
         try:
             step.next_action = NextAction(action)
         except ValueError:
@@ -692,7 +702,8 @@ class OrchestratorAgent:
             if checkpoints:
                 # Return latest checkpoint if valid
                 latest = max(checkpoints, key=os.path.getmtime)
-                if self.finetune_orch.validate_checkpoint(latest):
+                # Verify loadability
+                if self.finetune_orch.verify_checkpoint_load(latest, model_name=settings.default_base_model):
                     return latest
                 else:
                     self._log(f"Invalid checkpoint found at {latest}, ignoring.")

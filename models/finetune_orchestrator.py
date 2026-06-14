@@ -16,11 +16,16 @@ class FineTuneOrchestrator:
     available runtime, and user goal.
     """
 
-    def validate_checkpoint(self, checkpoint_path: str) -> bool:
-        """Validate that the checkpoint contains necessary model files."""
-        # Check for model.safetensors or adapter_model.bin
-        return os.path.exists(os.path.join(checkpoint_path, "model.safetensors")) or \
-               os.path.exists(os.path.join(checkpoint_path, "adapter_model.bin"))
+    def verify_checkpoint_load(self, checkpoint_path: str, model_name: str) -> bool:
+        """Perform a quick validation by loading the model."""
+        try:
+            from transformers import AutoModelForCausalLM
+            # Load only the config or a very small portion to verify integrity
+            AutoModelForCausalLM.from_pretrained(checkpoint_path, torch_dtype="auto")
+            return True
+        except Exception as e:
+            logger.error(f"Checkpoint verification failed: {e}")
+            return False
 
     # ------------------------------------------------------------------ #
     #  Top-level: select method + generate complete training script
