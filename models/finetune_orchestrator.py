@@ -137,7 +137,7 @@ class FineTuneOrchestrator:
 
         Returns the script as a string ready to send to ColabRunner.
         """
-        token = hf_token or self.hf_token or "YOUR_HF_TOKEN"
+        token = hf_token or os.environ.get("HF_TOKEN", "YOUR_HF_TOKEN")
         use_4bit = method == "qlora"
         is_full = method == "full"
 

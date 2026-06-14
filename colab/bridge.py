@@ -191,7 +191,10 @@ class ColabBridge:
                     self._send_buffer()
                     self._stop_event.wait(timeout=interval)
             except Exception as e:
-                logger.warning(f"Bridge connection error: {e}")
+                if "ConnectionRefused" in str(e) or "10061" in str(e) or "111" in str(e):
+                    logger.debug(f"Bridge connection refused (no WS server): {e}")
+                else:
+                    logger.warning(f"Bridge connection error: {e}")
                 with self._lock:
                     self._connected = False
                 if self._stop_event.wait(timeout=reconnect_delay):

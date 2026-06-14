@@ -341,9 +341,12 @@ class OrchestratorAgent:
         if prev.get("has_checkpoint"):
             self._log(f"Previous checkpoint found (v{prev.get('checkpoint_version')}). Will auto-resume.")
 
-        # Start WebSocket bridge
-        self.bridge.start(job_id=self.current_job_id)
-        self._log("ColabBridge started")
+        # Start WebSocket bridge (silently skip if no WS server)
+        try:
+            self.bridge.start(job_id=self.current_job_id)
+            self._log("ColabBridge started")
+        except Exception:
+            self._log("ColabBridge skipped (no WebSocket server)")
 
         # Phase 2: Execute steps
         print("[AGENT] Starting execution...")
@@ -929,6 +932,33 @@ print(dataset[0])
              "content": "Analyze Colab output. Return ONLY JSON."},
             {"role": "user", "content": prompt},
         ], parser="json_only")
+
+    def _handle_analysis(self, step: PlanStep, analysis: dict):
+        """Process the LLM's analysis of a step execution result."""
+        status = analysis.get("status", "failed")
+        if status == "success":
+            step.status = StepStatus.SUCCESS
+            step.metrics = analysis.get("key_values", {})
+            step.next_action = NextAction.PROCEED
+            self._log(f"Step {step.id}: success ({analysis.get('summary', '')})")
+        elif status == "failed":
+            step.error = analysis.get("error", "Unknown error")
+            error_type = analysis.get("error_type", "unknown")
+            fix = analysis.get("fix_suggestion", "")
+            next_action = analysis.get("next_action", "retry")
+            if next_action == "switch_runtime":
+                step.next_action = NextAction.SWITCH_RUNTIME
+                self._log(f"Step {step.id}: OOM -> switch runtime ({fix})")
+            elif next_action == "change_model":
+                step.next_action = NextAction.CHANGE_MODEL
+                self._log(f"Step {step.id}: model change needed ({fix})")
+            else:
+                step.next_action = NextAction.RETRY
+                self._log(f"Step {step.id}: {error_type} -> retry ({fix})")
+        elif status == "skip":
+            step.status = StepStatus.SKIPPED
+            step.next_action = NextAction.PROCEED
+            self._log(f"Step {step.id}: skipped ({analysis.get('summary', '')})")
 
     # ---------------------------------------------------------------- #
     #  Runtime management
