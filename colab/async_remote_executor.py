@@ -28,10 +28,12 @@ class AsyncRemoteColabExecutor:
     preserving event loop responsiveness.
     """
 
-    def __init__(self, headless: bool = True, user_data_dir: Optional[str] = None):
+    def __init__(self, headless: bool = True, user_data_dir: Optional[str] = None,
+                 browser_path: Optional[str] = None):
         self._sync = RemoteColabExecutor(
             headless=headless,
             user_data_dir=user_data_dir or _DEFAULT_USER_DATA_DIR,
+            browser_path=browser_path,
         )
         self._lock = asyncio.Lock()
 

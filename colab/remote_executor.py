@@ -54,9 +54,11 @@ class RemoteColabExecutor:
       - Output reading via DOM polling
     """
 
-    def __init__(self, headless: bool = True, user_data_dir: str = USER_DATA_DIR):
+    def __init__(self, headless: bool = True, user_data_dir: str = USER_DATA_DIR,
+                 browser_path: Optional[str] = None):
         self.headless = headless
         self.user_data_dir = user_data_dir
+        self.browser_path = browser_path
 
         self._lock = threading.RLock()
         self._browser = None
@@ -117,11 +119,14 @@ class RemoteColabExecutor:
             from playwright.sync_api import sync_playwright
 
             with sync_playwright() as pw:
-                browser = pw.chromium.launch_persistent_context(
-                    user_data_dir=self.user_data_dir,
-                    headless=False,
-                    args=["--no-sandbox"],
-                )
+                launch_opts = {
+                    "user_data_dir": self.user_data_dir,
+                    "headless": False,
+                    "args": ["--no-sandbox"],
+                }
+                if self.browser_path:
+                    launch_opts["executable_path"] = self.browser_path
+                browser = pw.chromium.launch_persistent_context(**launch_opts)
                 page = browser.new_page()
                 page.goto("https://colab.research.google.com", timeout=60000)
                 print("Browser open. Log into Google, then close this terminal tab.")
@@ -190,12 +195,17 @@ class RemoteColabExecutor:
                     "--disable-gpu",
                 ],
             }
+            if self.browser_path:
+                launch_kwargs["executable_path"] = self.browser_path
 
             if user_dir:
+                ctx_kwargs = {k: v for k, v in launch_kwargs.items() if k != "headless"}
+                ctx_kwargs["headless"] = self.headless
+                if self.browser_path:
+                    ctx_kwargs["executable_path"] = self.browser_path
                 self._context = self._pw.chromium.launch_persistent_context(
                     user_data_dir=user_dir,
-                    **{k: v for k, v in launch_kwargs.items() if k != "headless"},
-                    headless=self.headless,
+                    **ctx_kwargs,
                 )
                 self._page = self._context.new_page()
                 logger.info(f"Using saved session from {user_dir}")

@@ -171,9 +171,9 @@ class OrchestratorAgent:
       - Code sanitization
     """
 
-    def __init__(self, verbose: bool = None, model: str = None, dataset: str = None, method: str = None, executor: str = "auto"):
+    def __init__(self, verbose: bool = None, model: str = None, dataset: str = None, method: str = None, executor: str = "auto", browser_path: str = None):
         self.llm = LLMClient()
-        self.runner = ColabRunner(executor=executor)
+        self.runner = ColabRunner(executor=executor, browser_path=browser_path)
         self.verbose = settings.agent_verbose if verbose is None else verbose
         self.conversation_id = None
         self.current_job_id = None
@@ -1381,17 +1381,17 @@ print(dataset[0])
 _current_agent: Optional[OrchestratorAgent] = None
 
 
-def run_agent(goal: str, verbose: bool = True, model: str = None, dataset: str = None, method: str = None, executor: str = "auto") -> dict:
+def run_agent(goal: str, verbose: bool = True, model: str = None, dataset: str = None, method: str = None, executor: str = "auto", browser_path: str = None) -> dict:
     global _current_agent
-    agent = OrchestratorAgent(verbose=verbose, model=model, dataset=dataset, method=method, executor=executor)
+    agent = OrchestratorAgent(verbose=verbose, model=model, dataset=dataset, method=method, executor=executor, browser_path=browser_path)
     _current_agent = agent
     return agent.run(goal)
 
 
-async def async_run_agent(goal: str, verbose: bool = True, model: str = None, dataset: str = None, method: str = None, executor: str = "auto") -> dict:
+async def async_run_agent(goal: str, verbose: bool = True, model: str = None, dataset: str = None, method: str = None, executor: str = "auto", browser_path: str = None) -> dict:
     """Async entry point. Creates agent and returns result from async_run()."""
     global _current_agent
-    agent = OrchestratorAgent(verbose=verbose, model=model, dataset=dataset, method=method, executor=executor)
+    agent = OrchestratorAgent(verbose=verbose, model=model, dataset=dataset, method=method, executor=executor, browser_path=browser_path)
     _current_agent = agent
     return await agent.async_run(goal)
 

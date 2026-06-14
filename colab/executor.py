@@ -103,7 +103,8 @@ class ColabRunner:
     to Colab, executes code via CodeMirror JS API + keyboard automation.
     """
 
-    def __init__(self, drive_folder_id: Optional[str] = None, executor: str = "auto"):
+    def __init__(self, drive_folder_id: Optional[str] = None, executor: str = "auto",
+                 browser_path: Optional[str] = None):
         self.drive_folder_id = drive_folder_id
         self.session = None
         self.active_notebook_id = None
@@ -113,6 +114,7 @@ class ColabRunner:
         self._lock = threading.RLock()
         self._local_kernel = None
         self._remote_executor = None
+        self._browser_path = browser_path
         self._mode = executor
         self._connected = False
         self._fallback_reason = None
@@ -192,7 +194,7 @@ class ColabRunner:
         from colab.remote_executor import RemoteColabExecutor
 
         # Step 1: Try Playwright
-        executor = RemoteColabExecutor(headless=True)
+        executor = RemoteColabExecutor(headless=True, browser_path=self._browser_path)
         self._remote_executor = executor
 
         if executor.available:
@@ -242,7 +244,7 @@ class ColabRunner:
         """Lazy-init the remote Playwright executor with fallback."""
         if self._remote_executor is None:
             from colab.remote_executor import RemoteColabExecutor
-            self._remote_executor = RemoteColabExecutor(headless=True)
+            self._remote_executor = RemoteColabExecutor(headless=True, browser_path=self._browser_path)
             result = self._remote_executor.connect()
             if not result.get("success"):
                 logger.warning(f"Remote executor connect failed: {result.get('error')}")

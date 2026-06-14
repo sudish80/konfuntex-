@@ -130,7 +130,8 @@ def cmd_init():
     _ok(f"database initialised at [white]{settings.data_dir}[/white]")
 
 
-def cmd_run(goal: str, model: str = None, dataset: str = None, method: str = None, executor: str = "auto"):
+def cmd_run(goal: str, model: str = None, dataset: str = None, method: str = None, executor: str = "auto",
+            browser_path: str = None):
     _sep()
     console.print(f"\n  [{ACCENT}]❯[/{ACCENT}]  [white bold]{escape(goal)}[/white bold]\n")
 
@@ -153,7 +154,8 @@ def cmd_run(goal: str, model: str = None, dataset: str = None, method: str = Non
     ]
     with Progress(*spinner_cols, console=console, transient=True) as prog:
         task = prog.add_task("planning…", total=None)
-        result = run_agent(goal, model=model, dataset=dataset, method=method, executor=executor)
+        result = run_agent(goal, model=model, dataset=dataset, method=method, executor=executor,
+                           browser_path=browser_path)
         prog.update(task, description="done")
 
     _sep()
@@ -757,9 +759,25 @@ def cmd_colab_resume():
         console.print(f"[{WARN}]No checkpoint found: {state.get('error', 'unknown')}[/{WARN}]")
 
 
-def cmd_colab_remote():
+def cmd_colab_remote(extra: list = None):
     """Execute code in Colab via Playwright automation (no manual steps)."""
     from colab.remote_executor import RemoteColabExecutor
+    import os
+
+    # Parse extra args for --browser-path
+    browser_path = None
+    if extra:
+        it = iter(extra)
+        for arg in it:
+            if arg == "--browser-path" or arg == "-b":
+                browser_path = next(it, None)
+            elif arg == "--login":
+                # One-time login mode
+                from colab.remote_executor import RemoteColabExecutor
+                r = RemoteColabExecutor(browser_path=browser_path)
+                print(f"Using browser: {browser_path or 'default Chromium'}")
+                r.login_once()
+                return
 
     console.print(f"[{HEADER}]Remote Colab Executor[/{HEADER}]")
     if not RemoteColabExecutor._check_playwright():
@@ -768,7 +786,7 @@ def cmd_colab_remote():
 
     headless = not Confirm.ask(f"[{ACCENT}]Show browser window?[/{ACCENT}]", default=True)
 
-    with RemoteColabExecutor(headless=headless) as executor:
+    with RemoteColabExecutor(headless=headless, browser_path=browser_path) as executor:
         console.print("[green]Connecting to Colab...[/green]")
         conn = executor.connect(timeout=60)
         if not conn.get("success"):
@@ -915,6 +933,7 @@ def main():
     parser.add_argument("--method", choices=["lora", "qlora", "full"])
     parser.add_argument("--executor", choices=["local", "colab", "auto", "remote"], default="auto",
                         help="Execution environment: local (persistent kernel), colab (upload code), remote (Playwright auto), auto (detect)")
+    parser.add_argument("--browser-path", "-b", help="Path to browser executable (e.g. Brave) for remote executor")
 
     args = parser.parse_args()
     cmd = args.command
@@ -924,7 +943,8 @@ def main():
         "init":         lambda: cmd_init(),
         "run":          lambda: cmd_run(
                             " ".join(extra) if extra else Prompt.ask(f"[{ACCENT}]goal[/{ACCENT}]"),
-                            model=args.model, dataset=args.dataset, method=args.method, executor=args.executor),
+                            model=args.model, dataset=args.dataset, method=args.method, executor=args.executor,
+                            browser_path=args.browser_path),
         "interactive":  lambda: cmd_interactive(),
         "jobs":         lambda: cmd_list_jobs(),
         "job":          lambda: cmd_show_job(extra[0]) if extra else _fail("need job id"),
@@ -937,7 +957,7 @@ def main():
         "colab-sync":      lambda: cmd_colab_sync(),
         "colab-resume":    lambda: cmd_colab_resume(),
         "colab-enterprise": lambda: cmd_colab_enterprise(),
-        "colab-remote":      lambda: cmd_colab_remote(),
+        "colab-remote":      lambda: cmd_colab_remote(extra),
         "detect":       lambda: cmd_detect(),
         "list-models":  lambda: cmd_list_models_spec(),
         "backup":       lambda: cmd_backup(" ".join(extra) if extra else None),
